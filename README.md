@@ -118,6 +118,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native driver first to populate `Resources/`, then `dotnet build` twice to embed) | Not required; resources are fixed files |
 | Version | Upstream version number (1.x) | `4.3.0.0` (follows GKME) |
+| AOT / trimming | Not annotated for AOT | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); the host publishes with `PublishAot` |
 | Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
 
 ## Directory structure
@@ -152,6 +153,30 @@ dotnet build -c Release
 ```
 
 GKME integration: place this repository and the GKME repository under the same parent directory; GKME references this project via `<ProjectReference Include="..\GKMD\GKMD.csproj" />`.
+
+## AOT support
+
+GKMD is **AOT / trimming compatible** and is meant to be linked into a Native AOT host:
+
+- `GKMD.csproj` sets `<IsAotCompatible>true</IsAotCompatible>`, so the trim / AOT / single-file analyzers run on every build. Both Debug and Release builds are warning-free (0 warnings / 0 errors).
+- The only reflection-based JSON paths (`GKLayoutLoader.cs`, `System.Text.Json` layout load/save) are annotated locally with `#pragma warning disable IL2026, IL3050`. A host that serializes layouts at runtime should keep the `GKLayout*` types alive (e.g. `JsonSerializerContext` or a trimmer root descriptor).
+- The embedded usbip-win2 payload (`Resources/USBip-0.9.8.0-x64.exe`) is a manifest resource and **survives Native AOT publishing**: a host app referencing this project reads it back at full length after `dotnet publish -r win-x64 -p:PublishAot=true`.
+
+Verify it yourself:
+
+```powershell
+# 1) library build with the trim / AOT analyzers on (must stay warning-free)
+dotnet build -c Release
+
+# 2) full Native AOT publish from a host project that references GKMD.csproj
+dotnet publish -c Release -r win-x64 -p:PublishAot=true
+```
+
+GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishTrimmed>` and links GKMD that way.
+
+## Releases
+
+Prebuilt `GKMD.dll` (Release, IL, RID-neutral AnyCPU) is attached to each [GitHub Release](../../releases); the release changelog lives in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## License
 

@@ -17,10 +17,12 @@
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <Description>GKMD virtual USB game controller engine (USB/IP backend), derived from hifihedgehog/HIDMaestro 1.5.1.</Description>
 
-    <!-- The engine is trimmed and AOT-compiled by its host (GKME). These
-         suppressions keep the library build clean for the handful of
-         reflection/JSON paths that predate the AOT port. -->
-    <NoWarn>$(NoWarn);IL2026;IL3050;IL2070;IL2072;IL2075;IL3000;CA1416</NoWarn>
+    <!-- AOT compatibility: the engine is published and AOT-compiled by its
+         host (GKME). IsAotCompatible turns on the trim / AOT / single-file
+         analyzers so this library stays linkable from a Native AOT app, and
+         the build is kept warning-free (the only reflection/JSON paths live
+         in GKLayoutLoader.cs with local IL2026/IL3050 suppressions). -->
+    <IsAotCompatible>true</IsAotCompatible>
     <DebugType>full</DebugType>
   </PropertyGroup>
 

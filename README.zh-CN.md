@@ -123,6 +123,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先构建原生驱动填充 `Resources/`，再两次 `dotnet build` 嵌入） | 不需要，资源为固定文件 |
 | 版本 | 上游版本号（1.x） | `4.3.0.0`（跟随 GKME） |
+| AOT / trimming | 未做 AOT 标注 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；由宿主以 `PublishAot` 发布 |
 | 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
 
 ## 目录结构
@@ -158,6 +159,38 @@ dotnet build -c Release
 
 GKME 集成方式：把本仓库与 GKME 仓库放在同一父目录下，GKME 通过
 `<ProjectReference Include="..\GKMD\GKMD.csproj" />` 引用本工程。
+
+## AOT 支持
+
+GKMD **兼容 AOT / trimming**，可被链接进 Native AOT 宿主程序：
+
+- `GKMD.csproj` 设置了 `<IsAotCompatible>true</IsAotCompatible>`，每次构建都会运行
+  trim / AOT / single-file 分析器，Debug 与 Release 构建均为 0 警告 / 0 错误。
+- 唯一基于反射的 JSON 路径（`GKLayoutLoader.cs`，`System.Text.Json` 的 layout
+  读写）在代码里用 `#pragma warning disable IL2026, IL3050` 就地标注；
+  运行时会序列化 layout 的宿主应保留 `GKLayout*` 类型（如 `JsonSerializerContext`
+  或 trimmer 根描述符）。
+- 内嵌的 usbip-win2 载荷（`Resources/USBip-0.9.8.0-x64.exe`）是 manifest
+  resource，**在 Native AOT 发布后依然存在**：引用本工程的宿主执行
+  `dotnet publish -r win-x64 -p:PublishAot=true` 后，可按完整长度读回该资源。
+
+自行验证：
+
+```powershell
+# 1) 打开 trim / AOT 分析器的类库构建（必须 0 警告）
+dotnet build -c Release
+
+# 2) 在引用 GKMD.csproj 的宿主工程里做完整的 Native AOT 发布
+dotnet publish -c Release -r win-x64 -p:PublishAot=true
+```
+
+GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishTrimmed>`
+发布，并以这种方式链接 GKMD。
+
+## 发布（Releases）
+
+每个 [GitHub Release](../../releases) 附带预构建的 `GKMD.dll`（Release、IL、AnyCPU，
+RID 无关），变更日志见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ## 许可
 

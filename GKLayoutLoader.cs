@@ -31,7 +31,10 @@ internal sealed class GKLayoutJsonConverter : JsonConverter<GKLayout>
 
         var json = root.GetRawText();
         var sub = options;  // reuse options (already configured with snake_case enum support)
-#pragma warning disable IL3050
+        // Reflection-based System.Text.Json. Safe only because the host
+        // (GKME) publishes with a JsonSerializerContext / preserved layout
+        // types; see the AOT section of the README.
+#pragma warning disable IL2026, IL3050
         return kind switch
         {
             GKLayoutKind.Unspecified         => JsonSerializer.Deserialize<GKUnspecifiedLayout>(json, sub),
@@ -52,14 +55,14 @@ internal sealed class GKLayoutJsonConverter : JsonConverter<GKLayout>
             GKLayoutKind.ControllerAdapter   => JsonSerializer.Deserialize<GKControllerAdapterLayout>(json, sub),
             _                                => throw new JsonException($"GKLayout: unhandled kind {kind}")
         };
-#pragma warning restore IL3050
+#pragma warning restore IL2026, IL3050
     }
 
     public override void Write(Utf8JsonWriter writer, GKLayout value, JsonSerializerOptions options)
     {
-#pragma warning disable IL2026
+#pragma warning disable IL2026, IL3050
         JsonSerializer.Serialize(writer, value, value.GetType(), options);
-#pragma warning restore IL2026
+#pragma warning restore IL2026, IL3050
     }
 
     /// <summary>Convert a snake_case JSON string ("left_stick_x") to its
