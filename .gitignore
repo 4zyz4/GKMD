@@ -1,0 +1,37 @@
+## Build results
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+[Ll]og/
+[Ll]ogs/
+
+## Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Build outputs
+*.dll
+*.pdb
+*.exe
+!Resources/USBip-*.exe
+*.binlog
+*.log
+
+## NuGet
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+**/packages/*
+
+## Test results
+[Tt]est[Rr]esult*/
+*.VisualState.xml
+TestResult.xml

@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>GKMD</AssemblyName>
+    <RootNamespace>GKMD</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+
+    <Version>4.3.0.0</Version>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <Description>GKMD virtual USB game controller engine (USB/IP backend), derived from hifihedgehog/HIDMaestro 1.5.1.</Description>
+
+    <!-- The engine is trimmed and AOT-compiled by its host (GKME). These
+         suppressions keep the library build clean for the handful of
+         reflection/JSON paths that predate the AOT port. -->
+    <NoWarn>$(NoWarn);IL2026;IL3050;IL2070;IL2072;IL2075;IL3000;CA1416</NoWarn>
+    <DebugType>full</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\USBip-0.9.8.0-x64.exe">
+      <LogicalName>GKMD.Resources.USBip-0.9.8.0-x64.exe</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Resources\THIRD-PARTY-NOTICES.txt">
+      <LogicalName>GKMD.Resources.THIRD-PARTY-NOTICES.txt</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>
