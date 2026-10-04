@@ -110,6 +110,17 @@ public sealed class UsbConfigurationSpec
     [JsonPropertyName("gip")]
     public bool Gip { get; set; }
 
+    /// <summary>Selects the Xbox Series X|S GIP dialect when <see cref="Gip"/>
+    /// is set. The Series controller (VID 0x045E / PID 0x0B12) speaks the same
+    /// GIP framing and handshake as the Xbox One, but its metadata advertises
+    /// the <c>IConsoleFunctionMap_InputReport</c> and
+    /// <c>DynamicLatencyInput</c> interfaces, and each input report carries an
+    /// 18-byte console function map (byte 0 bit 0 = Share) plus an 8-byte
+    /// dynamic-latency block after the 14-byte gamepad payload, for 40 bytes
+    /// total. False on the Xbox One persona.</summary>
+    [JsonPropertyName("gipSeries")]
+    public bool GipSeries { get; set; }
+
     /// <summary>HID "Enhanced Wheel Support" resolution multiplier, when the
     /// profile's report descriptor declares a Resolution Multiplier feature
     /// (the high-resolution mouse). Its feature report has no report ID. The

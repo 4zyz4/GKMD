@@ -58,6 +58,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// 14-byte GIP input payload and <see cref="_gip"/> owns the wire
     /// protocol instead of the generic descriptor-driven encoder.</summary>
     private readonly bool _gipProtocol;
+    /// <summary>True for the Xbox Series X|S persona (PID 0x0B12): the GIP
+    /// metadata advertises the console-function-map / dynamic-latency
+    /// interfaces and the shared payload is 15 bytes (14-byte body + Share).</summary>
+    private readonly bool _gipSeries;
     private GipResponder? _gip;
     private readonly Queue<byte[]> _gipReplies = new();          // 0x02/0x03/0x04/0x07/0x01 replies, served before stream frames
     private uint _lastGipSharedSeqNo;
@@ -141,6 +145,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             : Descriptors.ProductId == 0x2007 ? (byte)0x02
             : (byte)0x03;
         _gipProtocol = !_switchProtocol && (profile.UsbConfiguration?.Gip ?? false);
+        _gipSeries = _gipProtocol && (profile.UsbConfiguration?.GipSeries ?? false);
         _builder = (_hasHid && !_switchProtocol && !_gipProtocol) ? profile.GetOrBuildReportBuilder() : null;
         _rawInputSize = _builder != null && _builder.InputReportByteSize > 0
             ? _builder.InputReportByteSize
@@ -170,8 +175,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
         if (_gipProtocol)
         {
-            _gip = new GipResponder((src, rid, data) => PublishOutput(src, rid, data), index);
-            GipLog.Write($"create index={index} vid={Descriptors.VendorId:X4} pid={Descriptors.ProductId:X4}");
+            _gip = new GipResponder((src, rid, data) => PublishOutput(src, rid, data), index, _gipSeries);
+            GipLog.Write($"create index={index} vid={Descriptors.VendorId:X4} pid={Descriptors.ProductId:X4} series={_gipSeries}");
         }
 
         var cfg = profile.UsbConfiguration;
@@ -430,8 +435,9 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         }
     }
 
-    /// <summary>Seqlock read of the 14-byte GIP input payload from the shared
-    /// DATA section. Keeps the last body when no new frame has arrived.</summary>
+    /// <summary>Seqlock read of the GIP input payload from the shared DATA
+    /// section: 14 bytes for the Xbox One, 15 for the Series (body + Share).
+    /// Keeps the last body when no new frame has arrived.</summary>
     private bool TryReadGipPayload(out byte[] body)
     {
         body = Array.Empty<byte>();
@@ -458,9 +464,12 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         _lastGipSharedSeqNo = seq1;
 
         int dataLen = BitConverter.ToInt32(snap[4..]);
-        if (dataLen > 14) dataLen = 14;
+        // Series adds a trailing console-function-map byte (Share) after the
+        // 14-byte gamepad body.
+        int cap = _gipSeries ? 15 : 14;
+        if (dataLen > cap) dataLen = cap;
         if (dataLen <= 0) return false;
-        var b = new byte[14];
+        var b = new byte[cap];
         snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(b);
         body = b;
         return true;

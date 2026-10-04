@@ -30,9 +30,18 @@ internal sealed class GipResponder
     private const byte ClientId = 0;
 
     private const ushort VendorId = 0x045E;
+    // Xbox One (Model 1708) product id; the Xbox Series X|S (Model 1914) wired
+    // pad reports 0x0B12 instead.
     private const ushort ProductId = 0x02EA;
+    private const ushort SeriesProductId = 0x0B12;
 
     private readonly Action<byte, byte, byte[]> _publishOutput;
+
+    // True for the Xbox Series X|S persona: the metadata advertises the
+    // console-function-map and dynamic-latency interfaces and the input report
+    // is 40 bytes (14-byte gamepad payload + 18-byte map + 8-byte latency).
+    private readonly bool _series;
+    private readonly ushort _productId;
 
     private readonly byte[] _hello;
     private readonly byte[] _status;
@@ -48,19 +57,24 @@ internal sealed class GipResponder
     private bool _havePayload;
     private bool _guideInitialized;
     private bool _lastGuide;
+    // Series Share button, carried in the console function map byte (map[0]
+    // bit 0) appended to the input report.
+    private bool _share;
 
     public bool HostSeen => _hostSeen;
     public bool Active => _active;
     public bool Guide => (_payload[0] & 0x01) != 0;
 
-    public GipResponder(Action<byte, byte, byte[]> publishOutput, int index)
+    public GipResponder(Action<byte, byte, byte[]> publishOutput, int index, bool series = false)
     {
         _publishOutput = publishOutput;
+        _series = series;
+        _productId = series ? SeriesProductId : ProductId;
         _hello = BuildHello(index);
         _status = BuildStatus();
-        _metadata = Convert.FromHexString(MetadataBlobHex);
+        _metadata = series ? BuildSeriesMetadata() : Convert.FromHexString(MetadataBlobHex);
         _serial = BuildSerial(index);
-        if (_metadata.Length != 182)
+        if (!series && _metadata.Length != 182)
             throw new InvalidOperationException($"GIP metadata blob is {_metadata.Length} bytes, expected 182.");
     }
 
@@ -109,15 +123,30 @@ internal sealed class GipResponder
             (byte)(GipProtocol.OptAck | GipProtocol.OptInternal | ClientId), NextSeq(), p);
     }
 
-    /// <summary>Copies the latest 14-byte input payload. Returns true when the
-    /// payload actually changed.</summary>
+    /// <summary>Copies the latest input payload. Returns true when anything
+    /// (the 14-byte gamepad body, or the Series Share flag) actually changed.
+    /// On the Series persona the shared payload is 15 bytes: the 14-byte body
+    /// plus a trailing console-function-map byte whose bit 0 is Share.</summary>
     public bool UpdatePayload(ReadOnlySpan<byte> body)
     {
         if (body.Length < XboxOnePayloadSize) return false;
-        if (_havePayload && body.Slice(0, XboxOnePayloadSize).SequenceEqual(_payload)) return false;
-        body.Slice(0, XboxOnePayloadSize).CopyTo(_payload);
-        _havePayload = true;
-        return true;
+        bool changed = false;
+        if (!_havePayload || !body.Slice(0, XboxOnePayloadSize).SequenceEqual(_payload))
+        {
+            body.Slice(0, XboxOnePayloadSize).CopyTo(_payload);
+            _havePayload = true;
+            changed = true;
+        }
+        if (_series && body.Length > XboxOnePayloadSize)
+        {
+            bool share = (body[XboxOnePayloadSize] & 0x01) != 0;
+            if (share != _share)
+            {
+                _share = share;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     /// <summary>Reports and consumes a Guide state transition.</summary>
@@ -135,13 +164,25 @@ internal sealed class GipResponder
         return true;
     }
 
-    /// <summary>Gamepad Input Report (0x20), [MS-GIPUSB] Table 57.</summary>
+    /// <summary>Gamepad Input Report (0x20), [MS-GIPUSB] Table 57. The Xbox One
+    /// persona sends the 14-byte gamepad body; the Series persona pads it to 40
+    /// bytes with the 18-byte console function map (map[0] bit 0 = Share) and an
+    /// 8-byte dynamic-latency block, matching the layout Windows and SDL expect
+    /// for a Series pad.</summary>
     public byte[] BuildInputFrame()
     {
-        Span<byte> p = stackalloc byte[XboxOnePayloadSize];
+        int size = _series ? SeriesInputSize : XboxOnePayloadSize;
+        Span<byte> p = stackalloc byte[SeriesInputSize];
         _payload.CopyTo(p);
         p[0] &= 0xFE; // strip the internal Guide marker (bit 0 is reserved)
-        return GipProtocol.EncodeFrame(GipProtocol.CmdInput, 0x00, NextInputSeq(), p);
+        if (_series)
+        {
+            // Console function map (offset 14, 18 bytes) then dynamic latency
+            // (offset 32, 8 bytes). Only map[0] bit 0 (Share) is meaningful to
+            // the host; the rest stays zero.
+            p[XboxOnePayloadSize] = _share ? (byte)0x01 : (byte)0x00;
+        }
+        return GipProtocol.EncodeFrame(GipProtocol.CmdInput, 0x00, NextInputSeq(), p.Slice(0, size));
     }
 
     public void Reset()
@@ -152,10 +193,13 @@ internal sealed class GipResponder
         _havePayload = false;
         _guideInitialized = false;
         _lastGuide = false;
+        _share = false;
         Array.Clear(_payload);
     }
 
     private const int XboxOnePayloadSize = 14;
+    // 14-byte gamepad body + 18-byte console function map + 8-byte dynamic latency.
+    private const int SeriesInputSize = 40;
 
     // ── Host → device ────────────────────────────────────────────────────
 
@@ -245,13 +289,13 @@ internal sealed class GipResponder
     /// 8-byte DeviceID (bytes 6-7 zero), VendorID, ProductID, four firmware
     /// words, hardware major/minor, then the mandatory RF / security / GIP
     /// protocol versions (all 1.0).</summary>
-    private static byte[] BuildHello(int index)
+    private byte[] BuildHello(int index)
     {
         var p = new byte[28];
         p[0] = 0x02; p[1] = 0x48; p[2] = 0x4D; p[3] = 0x00; p[4] = 0x00; p[5] = (byte)index;
         // p[6..7] = 0 (DeviceID high bytes MUST be zero)
         GipProtocol.WriteU16LE(p, 8, VendorId);
-        GipProtocol.WriteU16LE(p, 10, ProductId);
+        GipProtocol.WriteU16LE(p, 10, _productId);
         // Firmware 1.0.0.0 (major/minor must match metadata's list).
         GipProtocol.WriteU16LE(p, 12, 1); GipProtocol.WriteU16LE(p, 14, 0);
         GipProtocol.WriteU16LE(p, 16, 0); GipProtocol.WriteU16LE(p, 18, 0);
@@ -284,6 +328,65 @@ internal sealed class GipResponder
         p[1] = 0x00; // status: OK
         serial.CopyTo(p, 2);
         return p;
+    }
+
+    // Xbox Series X|S metadata: the same shape as the [MS-GIPUSB] 2.2.2
+    // example, but the supported-interface list adds the console-function-map
+    // and dynamic-latency GUIDs and the 0x20 input message is declared 40 bytes
+    // (14-byte gamepad body + 18-byte console function map + 8-byte dynamic
+    // latency). Built by splicing the proven 182-byte Xbox One blob, so every
+    // offset, the firmware block and the message/preferred-type blocks stay
+    // byte-for-byte identical to the validated persona.
+    private static byte[] BuildSeriesMetadata()
+    {
+        var baseBlob = Convert.FromHexString(MetadataBlobHex); // 182 bytes
+        const int deviceStart = 16;
+        const int supportedOffset = 86;               // count byte of the Xbox One 3-GUID list
+        const int baseDeviceLength = 119;
+        const int messagesStart = deviceStart + baseDeviceLength; // 135
+
+        var guids = new[]
+        {
+            // IController {9776ff56-9bfd-4581-ad45-b645bba526d6}
+            new byte[] { 0x56, 0xFF, 0x76, 0x97, 0xFD, 0x9B, 0x81, 0x45, 0xAD, 0x45, 0xB6, 0x45, 0xBB, 0xA5, 0x26, 0xD6 },
+            // IGamepad {082e402c-07df-45e1-a5ab-a3127af197b5}
+            new byte[] { 0x2C, 0x40, 0x2E, 0x08, 0xDF, 0x07, 0xE1, 0x45, 0xA5, 0xAB, 0xA3, 0x12, 0x7A, 0xF1, 0x97, 0xB5 },
+            // IDevAuthPCOptOut {7a34ce77-7de2-45c6-8ca4-0042c08bd94a}
+            new byte[] { 0x77, 0xCE, 0x34, 0x7A, 0xE2, 0x7D, 0xC6, 0x45, 0x8C, 0xA4, 0x00, 0x42, 0xC0, 0x8B, 0xD9, 0x4A },
+            // IConsoleFunctionMap_InputReport {ecddd2fe-d387-4294-bd96-1a712e3dc77d}
+            new byte[] { 0xFE, 0xD2, 0xDD, 0xEC, 0x87, 0xD3, 0x94, 0x42, 0xBD, 0x96, 0x1A, 0x71, 0x2E, 0x3D, 0xC7, 0x7D },
+            // DynamicLatencyInput {87f2e56b-c3bb-49b1-8265-fffff37799ee}
+            new byte[] { 0x6B, 0xE5, 0xF2, 0x87, 0xBB, 0xC3, 0xB1, 0x49, 0x82, 0x65, 0xFF, 0xFF, 0xF3, 0x77, 0x99, 0xEE },
+        };
+
+        int supportedLen = 1 + guids.Length * 16;                        // 81
+        int deviceLength = (supportedOffset - deviceStart) + supportedLen; // 151
+        int messagesLen = baseBlob.Length - messagesStart;               // 47
+        int total = deviceStart + deviceLength + messagesLen;            // 214
+
+        var blob = new byte[total];
+        Array.Copy(baseBlob, 0, blob, 0, supportedOffset);
+        blob[deviceStart] = (byte)(deviceLength & 0xFF);
+        blob[deviceStart + 1] = (byte)(deviceLength >> 8);
+
+        int p = supportedOffset;
+        blob[p++] = (byte)guids.Length;
+        foreach (var g in guids)
+        {
+            Array.Copy(g, 0, blob, p, 16);
+            p += 16;
+        }
+
+        Array.Copy(baseBlob, messagesStart, blob, p, messagesLen);
+        // First message metadata entry follows the num_messages byte: patch its
+        // 0x20 input payload length from 14 to 40.
+        int firstMessage = p + 1;
+        blob[firstMessage + 3] = SeriesInputSize;
+        blob[firstMessage + 4] = 0;
+
+        blob[14] = (byte)(total & 0xFF);
+        blob[15] = (byte)(total >> 8);
+        return blob;
     }
 
     // Compiled GIP Gamepad metadata blob, 182 bytes, from [MS-GIPUSB]

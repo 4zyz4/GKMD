@@ -28,6 +28,7 @@ internal static class StaticProfileRegistry
         s_profiles["keyboard"] = BuildKeyboard();
         s_profiles["mouse"] = BuildMouse();
         s_profiles["xbox-one"] = BuildXboxOne();
+        s_profiles["xbox-series"] = BuildXboxSeries();
     }
 
     public static Dictionary<string, ControllerProfile> AllProfiles => s_profiles;
@@ -217,6 +218,84 @@ internal static class StaticProfileRegistry
                     "implemented by UsbipEmulatedDevice's GipResponder. Audio (the " +
                     "controller's headset function) is not presented, matching " +
                     "third-party pads.",
+            UsbConfiguration = uc
+        };
+    }
+
+    // ── Xbox Series X|S (Model 1914) GIP persona ─────────────────────────
+    //
+    // The wired Xbox Series X|S controller is the same vendor-class GIP device
+    // family as the Xbox One (bDeviceClass 0xFF, bInterfaceSubClass 0x47,
+    // bDeviceProtocol 0xD0), but enumerates as VID 045E:0B12 and its GIP
+    // metadata advertises the console-function-map (Share button) and
+    // dynamic-latency interfaces. Windows binds the same dc1-controller.inf
+    // (xboxgip.sys) and exposes the pad as XInput; SDL's GIP driver adds the
+    // Share button. The descriptor shape is identical to the Xbox One profile
+    // (one data interface, no audio function); only the PID, product string,
+    // metadata and the 40-byte input report differ (see GipResponder).
+    private static ControllerProfile BuildXboxSeries()
+    {
+        var uc = new UsbConfigurationSpec
+        {
+            ConfigurationValue = 1,
+            Attributes = 0x80,
+            MaxPowerMilliamps = 500,
+            BusSpeed = "full",
+            Gip = true,
+            GipSeries = true,
+            // bcdUSB 2.00, class 0xFF, subclass 0x47, protocol 0xD0,
+            // bMaxPacketSize0 64, VID 045E PID 0B12, bcdDevice 0x0501,
+            // iMfr 1 / iProduct 2 / iSerial 3.
+            DeviceDescriptorHex = "12010002FF47D0405E04120B010501020301",
+            // Config wTotalLength 0x20: one vendor-class interface with an
+            // interrupt IN 0x81 and interrupt OUT 0x01, 64-byte packets.
+            ConfigurationDescriptorHex =
+                "0902200001010080FA" +
+                "0904000002FF47D000" +
+                "07058103400004" +
+                "07050103400004",
+            InputReportSize = 40,
+            Interfaces = new List<UsbInterfaceSpec>
+            {
+                new UsbInterfaceSpec
+                {
+                    InterfaceNumber = 0, Function = "",
+                    AltSettings = new List<UsbAltSettingSpec>
+                    {
+                        new UsbAltSettingSpec
+                        {
+                            AltSetting = 0, InterfaceClass = 0xFF, InterfaceSubClass = 0x47,
+                            InterfaceProtocol = 0xD0,
+                            Endpoints = new List<UsbEndpointSpec>
+                            {
+                                new UsbEndpointSpec { Address = 0x81, TransferType = "interrupt", MaxPacketSize = 64, Interval = 4 },
+                                new UsbEndpointSpec { Address = 0x01, TransferType = "interrupt", MaxPacketSize = 64, Interval = 4 }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        return new ControllerProfile
+        {
+            Id = "xbox-series",
+            Name = "Xbox Series X|S Controller (Model 1914)",
+            Vendor = "Microsoft",
+            Vid = "0x045E",
+            Pid = "0x0B12",
+            ProductString = "Xbox Wireless Controller",
+            ManufacturerString = "Microsoft",
+            Type = "gamepad",
+            InputReportSize = 40,
+            Notes = "Wired Xbox Series X|S controller (Model 1914, VID 045E:0B12) " +
+                    "as a genuine vendor-class GIP device. Same handshake and " +
+                    "framing as the Xbox One persona, but the metadata adds " +
+                    "IConsoleFunctionMap_InputReport and DynamicLatencyInput, and " +
+                    "each 0x20 input report is 40 bytes: the 14-byte gamepad body, " +
+                    "an 18-byte console function map (byte 14 bit 0 = Share) and an " +
+                    "8-byte dynamic-latency block. Windows xboxgip.sys exposes it " +
+                    "as XInput; SDL's GIP driver surfaces the Share button.",
             UsbConfiguration = uc
         };
     }
