@@ -122,7 +122,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 资源逻辑名 | `HIDMaestro.Resources.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先构建原生驱动填充 `Resources/`，再两次 `dotnet build` 嵌入） | 不需要，资源为固定文件 |
-| 版本 | 上游版本号（1.x） | `4.5.0.0`（跟随 GKME） |
+| 版本 | 上游版本号（1.x） | `4.5.2.0`（跟随 GKME） |
 | AOT / trimming | 未做 AOT 标注 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；由宿主以 `PublishAot` 发布 |
 | 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
 

@@ -12,7 +12,7 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <LangVersion>latest</LangVersion>
 
-    <Version>4.5.0.0</Version>
+    <Version>4.5.2.0</Version>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <Description>GKMD virtual USB game controller engine (USB/IP backend), derived from hifihedgehog/HIDMaestro 1.5.1.</Description>
