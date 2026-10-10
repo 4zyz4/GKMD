@@ -30,7 +30,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP | Pure USB/IP: usbip-win2 virtual host controller + vHCI, **no kernel driver, no INF, no device node** |
 | Device node | Creates a root-enumerated / SWD PnP devnode and writes friendly name / ControllerIndex | No PnP devnode; device strings come directly from USB descriptors |
 | Transport installation | `DriverBuilder.FullDeploy()`: self-signed cert → sign → inf2cat → pnputil | `UsbipDriverInstaller` deploys / upgrades usbip-win2 |
-| usbip-win2 version | 0.9.7.7 | **0.9.8.0** (IOCTL ABI and structs updated in sync) |
+| usbip-win2 version | 0.9.7.7 | **0.9.8.1** (IOCTL ABI and structs updated in sync) |
 | USB/IP receive mode | Zero-copy (zero-copy MDL) only | Adds `UsbipReceiveMode.LowLatency` (default) / `ZeroCopy` |
 | Installation policy | Silently auto-installs on first creation | **Probe only**; throws `UsbipInstallRequiredException` / `UsbipRebootRequiredException` when missing/outdated, leaving installation to the host app |
 | Audio engine | `Audio` is always non-null | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
@@ -111,8 +111,8 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Platform | x64 (`PlatformTarget`) | AnyCPU |
 | Namespaces | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | Directory structure | `HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` | Flattened to the root + the `Usbip/` subdirectory |
-| Driver resources | The `PackResources` target collects `HIDMaestro.dll`, two INFs, `hmswd.exe`, and the signtool/inf2cat dependency tree from `build/` and the local WDK | **Embeds no kernel driver/signing/catalog tools**; embeds only `Resources/USBip-0.9.8.0-x64.exe` and `THIRD-PARTY-NOTICES.txt` |
-| usbip-win2 acquisition | Build-time `DownloadFile` of 0.9.7.7 with SHA256 verification (fails on mismatch) | Embeds 0.9.8.0 directly, no download target (SHA256 still verified at runtime) |
+| Driver resources | The `PackResources` target collects `HIDMaestro.dll`, two INFs, `hmswd.exe`, and the signtool/inf2cat dependency tree from `build/` and the local WDK | **Embeds no kernel driver/signing/catalog tools**; embeds only `Resources/USBip-0.9.8.1-x64.exe` and `THIRD-PARTY-NOTICES.txt` |
+| usbip-win2 acquisition | Build-time `DownloadFile` of 0.9.7.7 with SHA256 verification (fails on mismatch) | Embeds 0.9.8.1 directly, no download target (SHA256 still verified at runtime) |
 | Profile source | Linked and embedded from `profiles/**/*.json` (logical name `HIDMaestro.Profiles.*`) | No JSON resources, constructed in code by `StaticProfileRegistry.cs` |
 | Resource logical names | `HIDMaestro.Resources.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
@@ -142,7 +142,7 @@ GKMD/
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
 └── Resources/
-    ├── USBip-0.9.8.0-x64.exe
+    ├── USBip-0.9.8.1-x64.exe
     └── THIRD-PARTY-NOTICES.txt
 ```
 
@@ -160,7 +160,7 @@ GKMD is **AOT / trimming compatible** and is meant to be linked into a Native AO
 
 - `GKMD.csproj` sets `<IsAotCompatible>true</IsAotCompatible>`, so the trim / AOT / single-file analyzers run on every build. Both Debug and Release builds are warning-free (0 warnings / 0 errors).
 - The only reflection-based JSON paths (`GKLayoutLoader.cs`, `System.Text.Json` layout load/save) are annotated locally with `#pragma warning disable IL2026, IL3050`. A host that serializes layouts at runtime should keep the `GKLayout*` types alive (e.g. `JsonSerializerContext` or a trimmer root descriptor).
-- The embedded usbip-win2 payload (`Resources/USBip-0.9.8.0-x64.exe`) is a manifest resource and **survives Native AOT publishing**: a host app referencing this project reads it back at full length after `dotnet publish -r win-x64 -p:PublishAot=true`.
+- The embedded usbip-win2 payload (`Resources/USBip-0.9.8.1-x64.exe`) is a manifest resource and **survives Native AOT publishing**: a host app referencing this project reads it back at full length after `dotnet publish -r win-x64 -p:PublishAot=true`.
 
 Verify it yourself:
 

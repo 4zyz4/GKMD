@@ -32,16 +32,16 @@ namespace GKMD.Internal.Usbip;
 /// machine, on the first composite controller ever created.</para></summary>
 internal static class UsbipDriverInstaller
 {
-    public const string Version = "0.9.8.0";
+    public const string Version = "0.9.8.1";
     private const string InstallerFile = "USBip-" + Version + "-x64.exe";
     private const string NoticeFile = "THIRD-PARTY-NOTICES.txt";
 
     /// <summary>SHA256 of the upstream release asset, as published by the
-    /// GitHub release API for v.0.9.8.0. This is the runtime check on the
+    /// GitHub release API for v.0.9.8.1. This is the runtime check on the
     /// extracted copy, the other half of the build-time verification the
     /// SDK's resource packaging performs.</summary>
     private const string InstallerSha256 =
-        "81f426741f7ee2ed991febe24a22daca8400b6ae2f171054e3fb404897e15d39";
+        "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a";
 
     private static readonly object s_lock = new();
     private static bool s_verifiedThisProcess;

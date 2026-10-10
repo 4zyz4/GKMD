@@ -6,7 +6,7 @@ embedded in GKMD.dll and written to disk alongside the component
 whenever GKMD deploys it.
 
 --------------------------------------------------------------------
-usbip-win2 (version 0.9.8.0)
+usbip-win2 (version 0.9.8.1)
 https://github.com/vadimgrn/usbip-win2
 --------------------------------------------------------------------
 
@@ -17,8 +17,8 @@ create, so GKMD speaks the USB/IP protocol to usbip-win2's virtual host
 controller. Every device behavior remains in GKMD's own user-mode code.
 
 The redistributed binary is the upstream release asset
-USBip-0.9.8.0-x64.exe, unmodified, SHA256:
-81f426741f7ee2ed991febe24a22daca8400b6ae2f171054e3fb404897e15d39
+USBip-0.9.8.1-x64.exe, unmodified, SHA256:
+38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a
 
 BSD 2-Clause License
 

@@ -35,7 +35,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 驱动模型 | UMDF2 内核态用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP | 纯 USB/IP：usbip-win2 虚拟主机控制器 + vHCI，**无内核驱动、无 INF、无设备节点** |
 | 设备节点 | 创建 root-enumerated / SWD PnP devnode，写入 friendly name / ControllerIndex | 无 PnP devnode，设备字符串直接来自 USB 描述符 |
 | 传输安装 | `DriverBuilder.FullDeploy()`：自签证书 → 签名 → inf2cat → pnputil | `UsbipDriverInstaller` 部署 / 升级 usbip-win2 |
-| usbip-win2 版本 | 0.9.7.7 | **0.9.8.0**（IOCTL ABI、结构体同步更新） |
+| usbip-win2 版本 | 0.9.7.7 | **0.9.8.1**（IOCTL ABI、结构体同步更新） |
 | USB/IP 接收模式 | 仅零拷贝（zero-copy MDL） | 新增 `UsbipReceiveMode.LowLatency`（默认）/ `ZeroCopy` |
 | 安装策略 | 首次创建时静默自动安装 | 仅**探测**，缺失/过旧时抛 `UsbipInstallRequiredException` / `UsbipRebootRequiredException`，由宿主 App 显式安装 |
 | 音频引擎 | `Audio` 恒非空 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
@@ -116,8 +116,8 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | Platform | x64（`PlatformTarget`） | AnyCPU |
 | 命名空间 | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | 目录结构 | `HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` | 扁平化到根目录 + `Usbip/` 子目录 |
-| 驱动资源 | `PackResources` 目标从 `build/` 与本地 WDK 收集 `HIDMaestro.dll`、两个 INF、`hmswd.exe`、signtool/inf2cat 依赖树 | **不嵌入任何内核驱动/签名/编目工具**，仅嵌入 `Resources/USBip-0.9.8.0-x64.exe` 与 `THIRD-PARTY-NOTICES.txt` |
-| usbip-win2 获取 | 构建时 `DownloadFile` 拉取 0.9.7.7 并 SHA256 校验（不匹配则失败） | 直接嵌入 0.9.8.0，无下载目标（运行时仍校验 SHA256） |
+| 驱动资源 | `PackResources` 目标从 `build/` 与本地 WDK 收集 `HIDMaestro.dll`、两个 INF、`hmswd.exe`、signtool/inf2cat 依赖树 | **不嵌入任何内核驱动/签名/编目工具**，仅嵌入 `Resources/USBip-0.9.8.1-x64.exe` 与 `THIRD-PARTY-NOTICES.txt` |
+| usbip-win2 获取 | 构建时 `DownloadFile` 拉取 0.9.7.7 并 SHA256 校验（不匹配则失败） | 直接嵌入 0.9.8.1，无下载目标（运行时仍校验 SHA256） |
 | Profile 来源 | 从 `profiles/**/*.json` 链接嵌入（逻辑名 `HIDMaestro.Profiles.*`） | 无 JSON 资源，由 `StaticProfileRegistry.cs` 代码构造 |
 | 资源逻辑名 | `HIDMaestro.Resources.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
@@ -147,7 +147,7 @@ GKMD/
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
 └── Resources/
-    ├── USBip-0.9.8.0-x64.exe
+    ├── USBip-0.9.8.1-x64.exe
     └── THIRD-PARTY-NOTICES.txt
 ```
 
@@ -170,7 +170,7 @@ GKMD **兼容 AOT / trimming**，可被链接进 Native AOT 宿主程序：
   读写）在代码里用 `#pragma warning disable IL2026, IL3050` 就地标注；
   运行时会序列化 layout 的宿主应保留 `GKLayout*` 类型（如 `JsonSerializerContext`
   或 trimmer 根描述符）。
-- 内嵌的 usbip-win2 载荷（`Resources/USBip-0.9.8.0-x64.exe`）是 manifest
+- 内嵌的 usbip-win2 载荷（`Resources/USBip-0.9.8.1-x64.exe`）是 manifest
   resource，**在 Native AOT 发布后依然存在**：引用本工程的宿主执行
   `dotnet publish -r win-x64 -p:PublishAot=true` 后，可按完整长度读回该资源。
 

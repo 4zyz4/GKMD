@@ -27,8 +27,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Resources\USBip-0.9.8.0-x64.exe">
-      <LogicalName>GKMD.Resources.USBip-0.9.8.0-x64.exe</LogicalName>
+    <EmbeddedResource Include="Resources\USBip-0.9.8.1-x64.exe">
+      <LogicalName>GKMD.Resources.USBip-0.9.8.1-x64.exe</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="Resources\THIRD-PARTY-NOTICES.txt">
       <LogicalName>GKMD.Resources.THIRD-PARTY-NOTICES.txt</LogicalName>
