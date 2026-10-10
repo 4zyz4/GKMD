@@ -1,5 +1,137 @@
 # Release notes
 
+## v4.5.2 — 2026-10-10 — usbip-win2 0.9.8.1 support
+
+**English** | [简体中文](#v452--2026-10-10--支持-usbip-win2-0981)
+
+GKMD 4.5.2 upgrades the embedded USB/IP transport to usbip-win2 **0.9.8.1** and
+teaches the engine to speak the 0.9.8.1 vHCI request layout, so an installed
+0.9.8.1 driver is no longer misdetected as missing. It follows GKME 4.5.2.
+
+### Highlights
+
+- **usbip-win2 0.9.8.1 payload** — the embedded installer is upgraded from
+  `USBip-0.9.8.0-x64.exe` to `USBip-0.9.8.1-x64.exe`; `UsbipDriverInstaller`
+  carries the new version string and the upstream release SHA-256
+  (`38cad6…2a8518a`), which is still verified after extraction.
+  `THIRD-PARTY-NOTICES.txt` and both READMEs follow.
+- **Multi-layout vHCI probing** — `VhciClient` now probes the installed driver
+  for the ABI it actually supports across three layouts (**0.9.8.1 / 0.9.8.0 /
+  0.9.7.x**). In 0.9.8.1 a new `location_hash` follows `port`, growing
+  `plugin_hardware`, `stop_attach_attempts` and `imported_device` by 4 bytes
+  each; `Attach`, `StopAttachAttempts` and `GetImportedDevices` are all built
+  for the detected layout.
+- **Fix — false "not installed"** — a hard-coded 0.9.8.0-sized
+  `GET_IMPORTED_DEVICES` probe was rejected by 0.9.8.1 with an ABI error, so
+  `IsCurrentAbi()` returned `false` and an installed 0.9.8.1 was treated as
+  missing. The per-layout probe fixes this.
+- **0.9.7.x preserved** — `UsbipReceiveMode` is retained; 0.9.7.x has no
+  `wsk_events` field.
+- **Git LFS** — `Resources/*.exe` is now tracked through Git LFS.
+
+### Compatibility
+
+- Controller personas are unchanged (Xbox One / Series X|S, Xbox 360,
+  Switch Pro / Joy-Con, DualShock 4, DualSense, wheel, keyboard, mouse).
+- Works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or 0.9.8.1**.
+
+### Artifact
+
+| File | Size | Notes |
+| --- | --- | --- |
+| `GKMD.dll` | 26,392,576 bytes | Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1 |
+
+SHA-256: `6816340ED6574938A9A70E074CA73C21765843B50E1BCB34CB2587E8EA18F1FD`
+
+Produced by `dotnet build -c Release`; Native AOT compilation happens in the
+host application (GKME), not in this library.
+
+### Build / verify
+
+```powershell
+dotnet build -c Release
+dotnet publish -c Release -r win-x64 -p:PublishAot=true   # from a host project referencing GKMD.csproj
+```
+
+### Known limitations
+
+- The bundled usbip-win2 payload is x64-only.
+- Windows only (`net10.0-windows`).
+- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
+  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
+
+### Credits & license
+
+Derived from HIDMaestro 1.5.1 (MIT); the original copyright notice is retained
+in [LICENSE](LICENSE). Bundled usbip-win2 is BSD-2-Clause, see
+[Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt).
+
+---
+
+## v4.5.2 — 2026-10-10 — 支持 usbip-win2 0.9.8.1
+
+[English](#v452--2026-10-10--usbip-win2-0981-support) | **简体中文**
+
+GKMD 4.5.2 将内嵌的 USB/IP 传输升级到 usbip-win2 **0.9.8.1**，并让引擎按
+0.9.8.1 的 vHCI 请求布局通信，已安装的 0.9.8.1 驱动不再被误判为未安装。跟随
+GKME 4.5.2 发布。
+
+### 亮点
+
+- **usbip-win2 0.9.8.1 载荷** — 内嵌安装程序由 `USBip-0.9.8.0-x64.exe` 升级至
+  `USBip-0.9.8.1-x64.exe`；`UsbipDriverInstaller` 同步新的版本串与上游 release
+  SHA-256（`38cad6…2a8518a`），解压后仍会校验。`THIRD-PARTY-NOTICES.txt` 与两份
+  README 一并更新。
+- **多布局 vHCI 探测** — `VhciClient` 改为探测已安装驱动实际支持的 ABI，覆盖
+  **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三种布局。0.9.8.1 在 `port` 之后新增
+  `location_hash`，使 `plugin_hardware`、`stop_attach_attempts` 与
+  `imported_device` 各增大 4 字节；`Attach`、`StopAttachAttempts` 与
+  `GetImportedDevices` 均按探测结果构造。
+- **修复：误报“未安装”** — 硬编码 0.9.8.0 尺寸的 `GET_IMPORTED_DEVICES` 探测被
+  0.9.8.1 以 ABI 错误拒绝，导致 `IsCurrentAbi()` 返回 `false`，已安装的 0.9.8.1
+  被误判为缺失；按布局探测后修复。
+- **保留 0.9.7.x** — 保留 `UsbipReceiveMode`；0.9.7.x 无 `wsk_events` 字段。
+- **Git LFS** — `Resources/*.exe` 改用 Git LFS 追踪。
+
+### 兼容性
+
+- 各手柄人格不变（Xbox One / Series X|S、Xbox 360、Switch Pro / Joy-Con、
+  DualShock 4、DualSense、方向盘、键盘、鼠标）。
+- 兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**。
+
+### 产物
+
+| 文件 | 大小 | 说明 |
+| --- | --- | --- |
+| `GKMD.dll` | 26,392,576 字节 | Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1 |
+
+SHA-256：`6816340ED6574938A9A70E074CA73C21765843B50E1BCB34CB2587E8EA18F1FD`
+
+由 `dotnet build -c Release` 生成；Native AOT 编译在宿主应用（GKME）中完成，
+而非本类库。
+
+### 构建 / 验证
+
+```powershell
+dotnet build -c Release
+dotnet publish -c Release -r win-x64 -p:PublishAot=true   # 在引用 GKMD.csproj 的宿主工程中执行
+```
+
+### 已知限制
+
+- 内嵌的 usbip-win2 载荷仅支持 x64。
+- 仅支持 Windows（`net10.0-windows`）。
+- layout 序列化/反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT 宿主中，
+  `GKLayout*` 类型需由宿主保留。
+
+### 致谢与许可
+
+派生自 HIDMaestro 1.5.1（MIT），原始版权声明保留在 [LICENSE](LICENSE)；
+捆绑的 usbip-win2 为 BSD-2-Clause，见
+[Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt)。
+
+---
+
 ## v4.3.0 — 2026-10-01 — first release
 
 **English** | [简体中文](#v430--2026-10-01--首个版本)
