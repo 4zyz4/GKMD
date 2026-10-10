@@ -7,17 +7,22 @@ using System.Text;
 namespace GKMD.Internal.Usbip;
 
 /// <summary>Talks to usbip-win2's vhci host controller through its public
-/// device-interface ioctl API (issue #39). Grounded in the pinned
-/// 0.9.8.0 sources: the interface GUID and every struct layout are
-/// <c>include/usbip/vhci.h</c>, which the driver documents as a public
-/// API whose input/output data stay stable for the lifetime of each
-/// IOCTL code.
+/// device-interface ioctl API (issue #39). The interface GUID and every
+/// struct layout are <c>include/usbip/vhci.h</c>, which the driver
+/// documents as a public API whose input/output data stay stable for the
+/// lifetime of each IOCTL code.
 ///
-/// <para>0.9.8.0 added <c>serial[SERIAL_BUFSZ]</c> and <c>wsk_events</c>
-/// to <c>plugin_hardware</c>, and <c>serial[SERIAL_BUFSZ]</c>,
-/// <c>iserial</c> and <c>wsk_events</c> to <c>imported_device</c>. The
-/// driver validates the input length against <c>sizeof(plugin_hardware)</c>
-/// exactly, so the enlarged sizes below are mandatory, not cosmetic.</para>
+/// <para>The layouts are NOT stable across releases, so the client speaks
+/// three of them and asks the driver which one it has. 0.9.8.0 appended a
+/// serial and a flag to the attach request and to each imported-device
+/// row. 0.9.8.1 put a <c>location_hash</c> after <c>port</c> in the
+/// location that attach, stop and every row carry, which moves busid,
+/// service and host 4 bytes on. Each size and offset in
+/// <see cref="Layouts"/> was checked against that tag's own header for
+/// x64. The driver compares every request's size field with its own
+/// <c>sizeof</c> and refuses a mismatch before acting on it
+/// (vhci_ioctl.cpp in all three tags), so a probe with the wrong size is
+/// harmless — which is exactly how the layout is discovered.</para>
 ///
 /// <para>Attach uses PLUGIN_HARDWARE_ONCE (function 0x806): one attempt,
 /// no background retry loop, because this SDK owns the server lifecycle
@@ -32,11 +37,14 @@ namespace GKMD.Internal.Usbip;
 /// availability detection: no usbip-win2, no interface, no backend.</para></summary>
 internal static class VhciClient
 {
-    // include/usbip/vhci.h GUID_DEVINTERFACE_USB_HOST_CONTROLLER
+    // include/usbip/vhci.h GUID_DEVINTERFACE_USB_HOST_CONTROLLER, renamed
+    // GUID_DEVINTERFACE_USBIP_VHCI in 0.9.8.1 with the same value.
     private static readonly Guid VhciInterfaceGuid = new(0xB4030C06, 0xDC5F, 0x4FCC,
         0x87, 0xEB, 0xE5, 0x51, 0x5A, 0x09, 0x35, 0xC0);
 
-    // CTL_CODE(FILE_DEVICE_UNKNOWN, fn, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
+    // CTL_CODE(FILE_DEVICE_UNKNOWN, fn, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA),
+    // the same in every tag. 0x806 is plugin_hardware_internal in 0.9.7.x
+    // and plugin_hardware_once from 0.9.8.0: one attempt, no retry loop.
     private const uint PLUGIN_HARDWARE = 0x0022E000;         // fn 0x800
     private const uint PLUGOUT_HARDWARE = 0x0022E004;        // fn 0x801
     private const uint GET_IMPORTED_DEVICES = 0x0022E008;    // fn 0x802
@@ -47,21 +55,11 @@ internal static class VhciClient
     private const int ServiceSize = 32;  // NI_MAXSERV
     private const int HostSize = 1025;   // NI_MAXHOST
 
-    // vhci::ioctl::plugin_hardware: base{ULONG size} + imported_device_location
-    // {int port; busid[32]; service[32]; host[1025];} + serial[SERIAL_BUFSZ=16]
-    // + bool wsk_events. base occupies 0..3, the location subobject 4..1099
-    // (1093 payload bytes padded to 1096), serial sits at 1100, wsk_events at
-    // 1116, and natural alignment pads the 1117 bytes to 1120. The driver
-    // rejects any other input length, so this size is exact.
-    //
-    // LocationOffset is where the busid string starts (port is the int at
-    // offset 4, busid at 8).
-    private const int LocationOffset = 8;
-    private const int WskEventsOffset = 1116;
-    private const int PluginStructSize = 1120;
-    // vhci::ioctl::stop_attach_attempts adds int count after host; 1101
-    // payload bytes pad to 1104.
-    private const int StopStructSize = 1104;
+    // Every request starts with ULONG size, and the location that follows
+    // starts with int port, so the port an attach returns is at offset 4
+    // in all three layouts, and so is the first imported-device row.
+    private const int HeaderSize = 4;
+    // plugout_hardware is identical in every tag: base{ULONG size} + int port.
     private const int PlugoutStructSize = 8;
 
     // plugout_hardware.port: > 0 detaches that port; <= 0 detaches every
@@ -70,10 +68,31 @@ internal static class VhciClient
     // the socket.
     private const int PortAll = -1;
 
-    // vhci::ioctl::get_imported_devices geometry (0.9.8.0): a 4-byte
-    // header followed by imported_device rows.
-    private const int ImportedDevicesHeaderSize = 4;
-    private const int ImportedDeviceRowSize = 1128;
+    // vhci.cpp set_usb_ports_cnt: MAX_TOTAL_PORTS is 255. The driver fails
+    // GET_IMPORTED_DEVICES with STATUS_BUFFER_TOO_SMALL when more devices
+    // are attached than the buffer holds, so a buffer this size cannot
+    // make the layout probe fail for that reason.
+    private const int MaxPorts = 255;
+
+    /// <summary>One release family's layout. <c>PluginSize</c>,
+    /// <c>StopSize</c> and <c>RowSize</c> are sizeof plugin_hardware,
+    /// stop_attach_attempts and imported_device. <c>BusIdOffset</c> is
+    /// where busid starts inside the request (after base + port); it is
+    /// 8 in 0.9.8.1, where a <c>location_hash</c> follows <c>port</c>, and
+    /// 4 before that. <c>WskEventsOffset</c> is where the 0.9.8.x
+    /// <c>wsk_events</c> flag sits in plugin_hardware, or -1 for 0.9.7.x,
+    /// whose request carries no serial and no flag (the driver's only
+    /// receive path there is the MDL one).</summary>
+    internal sealed record Layout(string Name, int PluginSize, int StopSize, int RowSize,
+                                  int BusIdOffset, int WskEventsOffset);
+
+    /// <summary>Newest first, which is the order the probe tries them.</summary>
+    internal static readonly Layout[] Layouts =
+    {
+        new("0.9.8.1", PluginSize: 1124, StopSize: 1108, RowSize: 1132, BusIdOffset: 8, WskEventsOffset: 1120),
+        new("0.9.8.0", PluginSize: 1120, StopSize: 1104, RowSize: 1128, BusIdOffset: 4, WskEventsOffset: 1116),
+        new("0.9.7.x", PluginSize: 1100, StopSize: 1104, RowSize: 1108, BusIdOffset: 4, WskEventsOffset: -1),
+    };
 
     /// <summary>True when usbip-win2's vhci controller is present and
     /// running. Requires no elevation.</summary>
@@ -117,29 +136,72 @@ internal static class VhciClient
             .CopyTo(buf.AsSpan(offset + BusIdSize + ServiceSize));
     }
 
+    /// <summary>Find the layout the installed driver speaks. Every tag
+    /// answers GET_IMPORTED_DEVICES only when the size field equals its own
+    /// sizeof(get_imported_devices), the header plus one row, and the call
+    /// changes nothing, so the first candidate that succeeds is the one.
+    /// The rows it returned are handed back for <see cref="GetImportedDevices"/>.</summary>
+    internal static Layout Probe(IntPtr handle, out byte[] rows, out uint written)
+    {
+        int lastError = 0;
+        foreach (var layout in Layouts)
+        {
+            var buf = new byte[HeaderSize + layout.RowSize * MaxPorts];
+            // The driver validates r->size against sizeof(get_imported_devices),
+            // the header plus ONE ANYSIZE_ARRAY row, not the caller's buffer
+            // length (vhci_ioctl.cpp get_imported_devices).
+            BitConverter.GetBytes((uint)(HeaderSize + layout.RowSize)).CopyTo(buf, 0);
+            if (DeviceIoControl(handle, GET_IMPORTED_DEVICES, buf, (uint)buf.Length,
+                    buf, (uint)buf.Length, out written, IntPtr.Zero))
+            {
+                rows = buf;
+                return layout;
+            }
+            lastError = Marshal.GetLastWin32Error();
+        }
+        throw new InvalidOperationException(
+            "The usbip-win2 host controller accepted none of the request layouts this SDK knows " +
+            $"(0.9.8.1, 0.9.8.0, 0.9.7.x). Last error 0x{lastError:X8}.");
+    }
+
+    /// <summary>The layout the installed driver speaks, for diagnostics.
+    /// Null when no host controller answers any known layout.</summary>
+    public static string? InstalledLayout()
+    {
+        try
+        {
+            using var h = Open();
+            return Probe(h.Handle, out _, out _).Name;
+        }
+        catch { return null; }
+    }
+
     /// <summary>Attach one exported device. Blocks until the driver has
     /// connected to the server, completed the import handshake, and
     /// plugged the UDE device in. Returns the vhci port for detach.
     ///
     /// <para><paramref name="receiveMode"/> selects the driver's network
-    /// receive path (usbip-win2 0.9.8.0). The serial field is left empty,
-    /// which the driver accepts and which disables its serial-based
-    /// descriptor patching.</para></summary>
+    /// receive path on the 0.9.8.x layouts (<c>wsk_events</c>); the 0.9.7.x
+    /// layout has no such field and always uses the MDL path. The serial
+    /// field is left empty, which the driver accepts and which disables its
+    /// serial-based descriptor patching.</para></summary>
     public static int Attach(string host, int port, string busid,
                              UsbipReceiveMode receiveMode = UsbipReceiveMode.LowLatency)
     {
         using var h = Open();
-        var buf = new byte[PluginStructSize];
-        BitConverter.GetBytes((uint)PluginStructSize).CopyTo(buf, 0);
-        WriteLocation(buf, LocationOffset, busid, port.ToString(), host);
-        buf[WskEventsOffset] = receiveMode == UsbipReceiveMode.LowLatency ? (byte)1 : (byte)0;
+        var layout = Probe(h.Handle, out _, out _);
+        var buf = new byte[layout.PluginSize];
+        BitConverter.GetBytes((uint)layout.PluginSize).CopyTo(buf, 0);
+        WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
+        if (layout.WskEventsOffset >= 0)
+            buf[layout.WskEventsOffset] = receiveMode == UsbipReceiveMode.LowLatency ? (byte)1 : (byte)0;
 
         if (!DeviceIoControl(h.Handle, PLUGIN_HARDWARE_ONCE, buf, (uint)buf.Length,
                 buf, (uint)buf.Length, out _, IntPtr.Zero))
             throw new Win32Exception(Marshal.GetLastWin32Error(),
-                $"usbip-win2 attach of {busid} at {host}:{port} failed.");
+                $"usbip-win2 {layout.Name} attach of {busid} at {host}:{port} failed.");
 
-        int vhciPort = BitConverter.ToInt32(buf, 4);
+        int vhciPort = BitConverter.ToInt32(buf, HeaderSize);
         if (vhciPort < 1)
             throw new InvalidOperationException($"usbip-win2 attach of {busid} returned port {vhciPort}.");
         return vhciPort;
@@ -191,34 +253,31 @@ internal static class VhciClient
         try
         {
             using var h = Open();
-            var buf = new byte[StopStructSize];
-            BitConverter.GetBytes((uint)StopStructSize).CopyTo(buf, 0);
-            WriteLocation(buf, LocationOffset, busid, port.ToString(), host);
+            var layout = Probe(h.Handle, out _, out _);
+            var buf = new byte[layout.StopSize];
+            BitConverter.GetBytes((uint)layout.StopSize).CopyTo(buf, 0);
+            WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
             DeviceIoControl(h.Handle, STOP_ATTACH_ATTEMPTS, buf, (uint)buf.Length,
                 buf, (uint)buf.Length, out _, IntPtr.Zero);
         }
         catch { /* cleanup path; absence of the driver is fine */ }
     }
 
-    /// <summary>True when the installed vhci driver accepts the 0.9.8.0
-    /// IOCTL structures. A pre-0.9.8.0 driver rejects
-    /// <c>get_imported_devices</c> when its <c>size</c> field is the new
-    /// sizeof (USBIP_ERROR_ABI), so a successful call proves the current
-    /// ABI and any failure is treated as "not current". Used by
+    /// <summary>True when the installed vhci driver accepts a request
+    /// layout this build knows (0.9.8.1, 0.9.8.0 or 0.9.7.x), so composite
+    /// personas can attach against it right now. A pre-0.9.8.1 driver
+    /// rejects a request whose <c>size</c> field is not its own
+    /// <c>sizeof</c> (USBIP_ERROR_ABI), so the probe proves both presence
+    /// and that this build can speak to it. Used by
     /// <see cref="UsbipDriverInstaller"/> to decide whether the bundled
-    /// installer must upgrade an older usbip-win2 in place.</summary>
+    /// installer must be deployed or an older usbip-win2 upgraded.</summary>
     public static bool IsCurrentAbi()
     {
         try
         {
             using var h = Open();
-            // A generous row count so a busier controller that answers
-            // STATUS_BUFFER_TOO_SMALL is not mistaken for an old driver.
-            var buf = new byte[ImportedDevicesHeaderSize + ImportedDeviceRowSize * 64];
-            BitConverter.GetBytes((uint)(ImportedDevicesHeaderSize + ImportedDeviceRowSize))
-                .CopyTo(buf, 0);
-            return DeviceIoControl(h.Handle, GET_IMPORTED_DEVICES, buf, (uint)buf.Length,
-                buf, (uint)buf.Length, out _, IntPtr.Zero);
+            Probe(h.Handle, out _, out _);
+            return true;
         }
         catch { return false; }
     }
@@ -232,28 +291,18 @@ internal static class VhciClient
         try
         {
             using var h = Open();
-            // imported_device = location (4 + 32 + 32 + 1025 = 1093, padded
-            // to 1096) + properties (4 devid + 4 speed + 2 + 2 + 16 serial +
-            // 1 iserial + 1 wsk_events = 32) = 1128. get_imported_devices =
-            // 4 size + devices[] at natural alignment 4 → offset 4.
-            const int HeaderSize = ImportedDevicesHeaderSize;
-            const int RowSize = ImportedDeviceRowSize;
-            var buf = new byte[HeaderSize + RowSize * 16];
-            // The driver validates r->size against sizeof(get_imported_devices),
-            // which is the header plus ONE ANYSIZE_ARRAY row (4 + 1128 = 1132),
-            // not the caller's buffer length (vhci_ioctl.cpp get_imported_devices).
-            BitConverter.GetBytes((uint)(HeaderSize + RowSize)).CopyTo(buf, 0);
-            if (!DeviceIoControl(h.Handle, GET_IMPORTED_DEVICES, buf, (uint)buf.Length,
-                    buf, (uint)buf.Length, out uint written, IntPtr.Zero))
-                return result;
-            int rows = written >= HeaderSize ? (int)((written - HeaderSize) / RowSize) : 0;
+            // The probe's successful call is the listing: a header of ULONG
+            // size, then one imported_device row per attached device.
+            var layout = Probe(h.Handle, out byte[] buf, out uint written);
+            int rows = written >= HeaderSize ? (int)((written - HeaderSize) / layout.RowSize) : 0;
             for (int i = 0; i < rows; i++)
             {
-                int off = HeaderSize + i * RowSize;
+                int off = HeaderSize + i * layout.RowSize;
                 int port = BitConverter.ToInt32(buf, off);
-                string busid = ReadUtf8(buf, off + 4, BusIdSize);
-                string service = ReadUtf8(buf, off + 4 + BusIdSize, ServiceSize);
-                string host = ReadUtf8(buf, off + 4 + BusIdSize + ServiceSize, HostSize);
+                int busidAt = off + layout.BusIdOffset;
+                string busid = ReadUtf8(buf, busidAt, BusIdSize);
+                string service = ReadUtf8(buf, busidAt + BusIdSize, ServiceSize);
+                string host = ReadUtf8(buf, busidAt + BusIdSize + ServiceSize, HostSize);
                 if (port >= 1) result.Add((port, busid, service, host));
             }
         }
@@ -304,7 +353,8 @@ internal static class VhciClient
 }
 
 /// <summary>Network receive path the usbip UDE driver uses for an imported
-/// device (usbip-win2 0.9.8.0 <c>plugin_hardware.wsk_events</c>).</summary>
+/// device (usbip-win2 0.9.8.x <c>plugin_hardware.wsk_events</c>). Ignored
+/// on the 0.9.7.x layout, whose request has no such field.</summary>
 internal enum UsbipReceiveMode
 {
     /// <summary>Zero-copy: the driver receives straight into the pending
