@@ -39,17 +39,18 @@ teaches the engine to speak the 0.9.8.1 vHCI request layout, so an installed
 
 | File | Size | Notes |
 | --- | --- | --- |
-| `GKMD.dll` | 26,392,576 bytes | Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1 |
+| `GKMD-v4.5.2.zip` | 25,419,331 bytes | Contains `GKMD.dll` (Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1), `LICENSE` and `THIRD-PARTY-NOTICES.txt` |
 
-SHA-256: `6816340ED6574938A9A70E074CA73C21765843B50E1BCB34CB2587E8EA18F1FD`
+SHA-256: `60EF842F3DDEC9F13327E47CDCE675485017BD6940AAFDC6CD63B86494A1B8A7`
 
-Produced by `dotnet build -c Release`; Native AOT compilation happens in the
-host application (GKME), not in this library.
+Produced by `dotnet build -c Release -t:PackageRelease`; Native AOT compilation
+happens in the host application (GKME), not in this library.
 
 ### Build / verify
 
 ```powershell
 dotnet build -c Release
+dotnet build -c Release -t:PackageRelease
 dotnet publish -c Release -r win-x64 -p:PublishAot=true   # from a host project referencing GKMD.csproj
 ```
 
@@ -103,17 +104,18 @@ GKME 4.5.2 发布。
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `GKMD.dll` | 26,392,576 字节 | Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1 |
+| `GKMD-v4.5.2.zip` | 25,419,331 字节 | 内含 `GKMD.dll`（Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt` |
 
-SHA-256：`6816340ED6574938A9A70E074CA73C21765843B50E1BCB34CB2587E8EA18F1FD`
+SHA-256：`60EF842F3DDEC9F13327E47CDCE675485017BD6940AAFDC6CD63B86494A1B8A7`
 
-由 `dotnet build -c Release` 生成；Native AOT 编译在宿主应用（GKME）中完成，
-而非本类库。
+由 `dotnet build -c Release -t:PackageRelease` 生成；Native AOT 编译在宿主应用
+（GKME）中完成，而非本类库。
 
 ### 构建 / 验证
 
 ```powershell
 dotnet build -c Release
+dotnet build -c Release -t:PackageRelease
 dotnet publish -c Release -r win-x64 -p:PublishAot=true   # 在引用 GKMD.csproj 的宿主工程中执行
 ```
 

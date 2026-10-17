@@ -35,4 +35,27 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="LICENSE" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
+    <None Include="Resources\THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- Release packaging: dotnet build -c Release -t:PackageRelease
+       Produces bin\Release\GKMD-v<version>.zip containing GKMD.dll, LICENSE
+       and THIRD-PARTY-NOTICES.txt so the notices travel with every copy. -->
+  <Target Name="PackageRelease" DependsOnTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
+      <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)</ReleaseStageDir>
+      <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion).zip</ReleaseZipPath>
+    </PropertyGroup>
+    <RemoveDir Directories="$(ReleaseStageDir)" />
+    <MakeDir Directories="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\LICENSE" DestinationFolder="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\Resources\THIRD-PARTY-NOTICES.txt" DestinationFolder="$(ReleaseStageDir)" />
+    <ZipDirectory SourceDirectory="$(ReleaseStageDir)" DestinationFile="$(ReleaseZipPath)" Overwrite="true" />
+    <Message Importance="high" Text="Release package: $(ReleaseZipPath)" />
+  </Target>
+
 </Project>

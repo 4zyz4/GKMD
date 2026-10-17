@@ -189,8 +189,11 @@ GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishT
 
 ## 发布（Releases）
 
-每个 [GitHub Release](../../releases) 附带预构建的 `GKMD.dll`（Release、IL、AnyCPU，
-RID 无关），变更日志见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+自 v4.5.2 起，每个 [GitHub Release](../../releases) 附带一个 `GKMD-v<版本>.zip`
+（Release、IL、AnyCPU，RID 无关），内含 `GKMD.dll`、`LICENSE` 与
+`THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。使用
+`dotnet build -c Release -t:PackageRelease` 生成，变更日志见
+[RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ## 许可
 

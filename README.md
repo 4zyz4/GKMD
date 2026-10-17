@@ -176,7 +176,7 @@ GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>t
 
 ## Releases
 
-Prebuilt `GKMD.dll` (Release, IL, RID-neutral AnyCPU) is attached to each [GitHub Release](../../releases); the release changelog lives in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+Starting with v4.5.2, each [GitHub Release](../../releases) attaches a single `GKMD-v<version>.zip` (Release, IL, RID-neutral AnyCPU) containing `GKMD.dll`, `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices travel with every copy of the binary. Build it with `dotnet build -c Release -t:PackageRelease`; the release changelog lives in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## License
 
