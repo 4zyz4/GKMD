@@ -456,6 +456,21 @@ public sealed class FieldSpec
     /// doesn't match that pattern, hence the explicit setting.</summary>
     [JsonPropertyName("stride")]
     public int? Stride { get; set; }
+
+    /// <summary>Issue #64: for a <c>uint16-le</c> sensor timestamp, how many
+    /// <see cref="GKGamepadState.SensorTimestamp"/> ticks (1/3 µs) make one
+    /// wire tick. A DualShock 4 counts in 16/3 µs, so its profiles set 16.
+    /// Default 1.</summary>
+    [JsonPropertyName("divisor")]
+    public int? Divisor { get; set; }
+
+    /// <summary>Issue #64: for a <c>uint8-battery</c> field, the value the
+    /// level bits carry while <see cref="GKGamepadState.BatteryFull"/> is
+    /// set, in place of the 0..10 level. A DualShock 4 on a cable reports
+    /// 11 when charged (Linux hid-playstation DS4_BATTERY_STATUS_FULL, SDL's
+    /// SDL_POWERSTATE_CHARGED branch). Unset leaves the level as is.</summary>
+    [JsonPropertyName("fullValue")]
+    public int? FullValue { get; set; }
 }
 
 /// <summary>v1.3.5 — CRC32 scope spec for a crc32-le field. The CRC is

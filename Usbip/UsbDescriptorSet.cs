@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace GKMD.Internal.Usbip;
@@ -93,7 +95,52 @@ internal sealed class UsbDescriptorSet
         public int TransferType => Attributes & 0x03; // 1 iso, 3 interrupt
     }
 
-    public UsbDescriptorSet(ControllerProfile profile)
+    /// <summary>Vary a captured serial per controller instance.
+    ///
+    /// Real units have unique serials and Steam keys its per-controller
+    /// config off the string it reads: the client writes
+    /// <c>configset_&lt;serial&gt;.vdf</c>. Two virtual Decks sharing one
+    /// serial therefore share one configuration, which is wrong the moment
+    /// somebody runs a pair of them.
+    ///
+    /// Instance 0 keeps the captured serial byte for byte, so a single
+    /// controller stays identical to the unit it was dumped from and the
+    /// golden descriptor hashes do not move. Later instances add the index
+    /// into the trailing digit run, which is where a real serial varies and
+    /// which preserves both the length and the character classes the
+    /// manufacturer's format uses.</summary>
+    internal static string? InstanceSerial(string? captured, int index)
+    {
+        if (index <= 0 || string.IsNullOrEmpty(captured)) return captured;
+        var chars = captured.ToCharArray();
+        int at = chars.Length - 1;
+        int carry = index;
+        while (at >= 0 && carry > 0 && char.IsDigit(chars[at]))
+        {
+            int v = (chars[at] - '0') + (carry % 10);
+            carry /= 10;
+            if (v > 9) { v -= 10; carry++; }
+            chars[at] = (char)('0' + v);
+            at--;
+        }
+        return new string(chars);
+    }
+
+    /// <summary>A stable USB serial for a persona whose profile carries
+    /// none. Windows keys the USB instance id on this string instead of on
+    /// the vhci port the attach happened to land on, so the device comes
+    /// back at the same path across a dispose/recreate, a process restart
+    /// and a reboot. A pure function of the controller index, like the
+    /// upstream identity fix (#60).</summary>
+    internal static string SyntheticSerial(int index)
+    {
+        byte[] digest = SHA256.HashData(
+            Encoding.UTF8.GetBytes($"GKMD.DeviceIdentity.v1\nindex:{index}"));
+        ulong hash = BinaryPrimitives.ReadUInt64BigEndian(digest);
+        return "GKMD" + (hash & 0xFFFF_FFFF_FFFFUL).ToString("X12");
+    }
+
+    public UsbDescriptorSet(ControllerProfile profile, int index = 0)
     {
         var cfg = profile.UsbConfiguration
             ?? throw new InvalidOperationException($"Profile '{profile.Id}' has no usbConfiguration.");
@@ -115,7 +162,23 @@ internal sealed class UsbDescriptorSet
         _iSerial = DeviceDescriptor[16];
         _manufacturer = profile.ManufacturerString;
         _product = profile.ProductString;
-        _serialNumber = profile.SerialNumberString;
+        _serialNumber = InstanceSerial(profile.SerialNumberString, index);
+        if (string.IsNullOrEmpty(_serialNumber))
+        {
+            // No captured serial: serve a synthetic one. A descriptor that
+            // declares iSerial, or one that leaves it at 0, gets a free
+            // string index so Windows can read it.
+            _serialNumber = SyntheticSerial(index);
+            if (_iSerial == 0)
+            {
+                byte iConfiguration = ConfigurationDescriptor.Length > 6
+                    ? ConfigurationDescriptor[6] : (byte)0;
+                byte next = 1;
+                while (next == _iManufacturer || next == _iProduct || next == iConfiguration) next++;
+                _iSerial = next;
+                DeviceDescriptor[16] = next;
+            }
+        }
 
         ushort profileVid = profile.VendorId, profilePid = profile.ProductId;
         if (VendorId != profileVid || ProductId != profilePid)

@@ -36,6 +36,26 @@ internal static class VendorBlobCodec
         // report (Sony: framingTag at byte 1, reportCounter at byte 8)
         // each advance independently.
         public Dictionary<string, byte> RollingCounters { get; } = new();
+
+        private long _clockOrigin;
+
+        /// <summary>Issue #64. The sensor time for this report in 1/3 µs
+        /// ticks: the consumer's own <see cref="GKGamepadState.SensorTimestamp"/>
+        /// when it sets one, otherwise the time since this controller's
+        /// first report. A real pad stamps every report, and SDL, Linux and
+        /// DS4Windows all take the motion interval from the difference
+        /// between stamps, so a stamp that never moves reads as no time
+        /// passing.</summary>
+        public uint SensorTicks(uint consumerTicks)
+        {
+            if (consumerTicks != 0) return consumerTicks;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_clockOrigin == 0) _clockOrigin = now;
+            // 3 ticks per microsecond, wrapping at 32 bits like the
+            // consumer's value does.
+            double us = (now - _clockOrigin) * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+            return unchecked((uint)(ulong)(us * 3.0));
+        }
     }
 
     // ── Input encoder: GKGamepadState → bytes ─────────────────────────────
@@ -141,7 +161,24 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.U8Const:
                 {
                     if (f.B < 0) break;
-                    buffer[f.B] = f.Initial;
+                    buffer[f.B] = f.Source == VendorBlobProgram.SrcOp.TouchpadPacketCounter
+                        ? state.TouchpadPacketCounter : f.Initial;
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U16:
+                {
+                    // Issue #64: the DualShock 4 sensor timestamp, little
+                    // endian in 16/3 µs ticks (SDL_hidapi_ps4.c "Sensor
+                    // timestamp is in 5.33us units", hid-playstation.c
+                    // dualshock4_input_report_common.sensor_timestamp).
+                    // Divisor 16 turns the SDK's 1/3 µs ticks into those, and
+                    // because 2^32 / 16 is a multiple of 2^16 the 16-bit
+                    // value still wraps cleanly when the 32-bit source does.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    uint u16 = f.Source == VendorBlobProgram.SrcOp.SensorTimestamp
+                        ? encState.SensorTicks(state.SensorTimestamp) / f.Divisor : 0u;
+                    buffer[f.B]     = (byte)(u16 & 0xFF);
+                    buffer[f.B + 1] = (byte)((u16 >> 8) & 0xFF);
                     break;
                 }
                 case VendorBlobProgram.FieldOp.I16:
@@ -211,6 +248,7 @@ internal static class VendorBlobCodec
                             VendorBlobProgram.FlagFull       => state.BatteryFull,
                             VendorBlobProgram.FlagMic        => state.MicMuted,
                             VendorBlobProgram.FlagHeadphones => state.HeadphonesConnected,
+                            VendorBlobProgram.FlagCable      => state.BatteryCharging || state.BatteryFull,
                             _ => false,
                         };
                         if (bit) packed |= (byte)(1 << (f.BitLo + i));
@@ -226,7 +264,8 @@ internal static class VendorBlobCodec
                     if (f.B < 0 || (uint)f.B >= (uint)buffer.Length) break;
                     int width = f.BitHi - f.BitLo + 1;
                     byte mask = (byte)(((1 << width) - 1) << f.BitLo);
-                    byte v = (byte)(state.BatteryLevel & ((1 << width) - 1));
+                    int level = f.FullValue >= 0 && state.BatteryFull ? f.FullValue : state.BatteryLevel;
+                    byte v = (byte)(level & ((1 << width) - 1));
                     buffer[f.B] = (byte)((buffer[f.B] & ~mask) | ((v << f.BitLo) & mask));
                     break;
                 }
@@ -269,8 +308,8 @@ internal static class VendorBlobCodec
                         var h = state.Hat;
                         bool on = bits switch
                         {
-                            VendorBlobProgram.ButtonLtDigital => leftTrigger > 0f,
-                            VendorBlobProgram.ButtonRtDigital => rightTrigger > 0f,
+                            VendorBlobProgram.ButtonLtDigital => TriggerByte(leftTrigger) > 0,
+                            VendorBlobProgram.ButtonRtDigital => TriggerByte(rightTrigger) > 0,
                             VendorBlobProgram.ButtonDpadUp    => h is GKHat.North or GKHat.NorthEast or GKHat.NorthWest,
                             VendorBlobProgram.ButtonDpadDown  => h is GKHat.South or GKHat.SouthEast or GKHat.SouthWest,
                             VendorBlobProgram.ButtonDpadLeft  => h is GKHat.West  or GKHat.NorthWest or GKHat.SouthWest,
@@ -581,6 +620,10 @@ internal static class VendorBlobCodec
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>The 8-bit value a <c>uint8-trigger</c> field writes for
+    /// <paramref name="v"/>, by the same arithmetic.</summary>
+    private static int TriggerByte(float v) => (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
 
     // CRC-32/ISO-HDLC, polynomial 0xEDB88320 (matches Sony BT, dualsense-tester,
     // ds4drv, hidapi, OpenRGB SonyDualSenseController, PadForge Ds5RawHidWriter).

@@ -85,22 +85,33 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | --- | --- |
 | `GKContext.cs` | Removes background warm-up from the constructor; `IsDriverInstalled` → `UsbipBackend.IsAvailable`; `InstallUsbipBackend` changed to `Install(interactive:false)` and throws on failure; `InstallDriver` → `EnsureInstalled()` (no longer auto-installs); `RemoveAllVirtualControllers` → `UsbipBackend.DetachAllOwned`; `LoadDefaultProfiles` now uses `StaticProfileRegistry`; removes `LoadProfilesFromDirectory`; `CreateController/CreateControllerAt` always go through USB/IP and allow a USB-only configuration (no HID descriptor); `FinalizeNames` becomes a no-op |
 | `GKController.cs` | `_reportBuilder` is nullable, adds `_rawReportBuffer`; `SubmitState` returns immediately for vendor profiles without HID; removes all PID publishing APIs; removes Switch Pro controller-side logic (moved to the device side); `UsbAudio` is created only when there is an audio streaming interface |
-| `ControllerProfile.cs` | Adds `SerialNumberString`; removes `Backend` / `RequiresUsbipBackend`; `UsbConfiguration` becomes the descriptor set carried by every profile; `GetOrBuildReportBuilder()` can return null; **removes the entire `ProfileDatabase` class** |
+| `ControllerProfile.cs` | Adds `SerialNumberString`; removes `Backend` / `RequiresUsbipBackend`; `UsbConfiguration` becomes the descriptor set carried by every profile; `GetOrBuildReportBuilder()` can return null; **removes the entire `ProfileDatabase` class**; `FieldSpec` gains `Divisor` / `FullValue` for the DualShock 4 fixes synced from 1.10.0 |
 | `SharedMemoryIO.cs` | **Removes the whole PID state**: PID_STATE size/offset constants, `EnsurePidStateMapping`, `WritePidPool/BlockLoad/State`, `ReadPidBlockLoad`, `WritePidReportIds` and related handles and disposal logic |
 | `UsbConfigurationSpec.cs` | Adds `InputReportSize`, `VendorRequests` (including the `VendorControlRequest` type), `Gip`, `ResolutionMultiplier`; comments changed to describe a USB/IP persona descriptor set |
-| `UsbDescriptorSet.cs` | `ReportDescriptor` is nullable, adds `HasHidInterface` / `InputEndpoint`; parses the vendor 0x21 class descriptor; the HID interface becomes optional; adds `GetClassDescriptor`; iSerial returns the real serial number |
+| `UsbDescriptorSet.cs` | `ReportDescriptor` is nullable, adds `HasHidInterface` / `InputEndpoint`; parses the vendor 0x21 class descriptor; the HID interface becomes optional; adds `GetClassDescriptor`; iSerial returns the real serial number; varies a captured serial per controller index and serves a stable synthetic serial for profiles that carry none (upstream 1.8.0 identity fix) |
 | `UsbipBackend.cs` | `Attach` passes `UsbipReceiveMode.LowLatency`; `UsbipBackendHandle.Dispose` adds `WaitForPortDetached` (with one retry) to avoid reusing an uncleaned port during fast mode switching |
 | `UsbipDriverInstaller.cs` | Bumps version/SHA to 0.9.8.0; `EnsureInstalled` now validates the ABI and throws "needs install / needs reboot" exceptions; adds `Install(interactive)`, Inno exit code parsing (0/3010), `NeedsRebootThisBoot` flag, `WaitForCurrentAbi`, `IsCurrentAbi`; `StampOwnerHardwareId` now enumerates `ROOT\USB\0000..000F` and stamps each |
-| `UsbipEmulatedDevice.cs` | Adds the GIP / Switch input pump branches, vendor-class opaque reporting, `vendorRequests`, Resolution Multiplier, DS4 0x20/0x81, DualSense test commands; only answers `InputEndpoint`; `Audio` is nullable; reconnect/reset cleanup; GIP error logging |
+| `UsbipEmulatedDevice.cs` | Adds the GIP / Switch input pump branches, vendor-class opaque reporting, `vendorRequests`, Resolution Multiplier, DS4 0x20/0x81, DualSense test commands; only answers `InputEndpoint`; `Audio` is nullable; reconnect/reset cleanup; GIP error logging; DualShock 4 0x01 offsets and 0x05 calibration from upstream 1.10.0; passes the interface / alternate setting to the audio engine |
 | `VhciClient.cs` | `plugin_hardware` struct expanded to 1120 bytes (adds serial / wsk_events), `imported_device` line 1128 bytes; `Attach` adds a `UsbipReceiveMode` parameter; `Detach` normalizes ≤0 to `PORT_ALL(-1)`; adds `WaitForPortDetached`, `IsCurrentAbi`, `UsbipReceiveMode` enum |
 | `UsbipServer.cs` | `Unregister` adds identity validation (prevents an old device from mistakenly deleting a new one); comment version bumped to 0.9.8.0 |
 | `GKProfile.cs` | Removes `Backend` / `RequiresUsbipBackend`; `Connection` uses `IsNullOrEmpty` for null checks; docs changed from "profile JSON" to "catalog / built-in" |
 | `GKLayoutLoader.cs` | Adds `IL3050` / `IL2026` suppressions and `System.Diagnostics.CodeAnalysis`, adapting to AOT / trimming |
 | `OemNameOverrideStore.cs` | Adds the `CA1416` (Windows-only) platform compatibility suppression |
 | `GKUsbAudio.cs` | Comment update; adds `!` to `device.Audio` now that it is nullable |
-| `UsbAudioEngine.cs` | Version semantics bumped to 0.9.8.0; `DeviceOrchestrator.LogDiag` → `Debug.WriteLine` |
-| `VendorBlobCodec.cs`, `HidReportBuilder.cs`, `HidDescriptorBuilder.cs`, `GKOutputDecodedEventArgs.cs`, `GKOutputEncoder.cs`, `GKProfileBuilder.cs` | Wording / minor null-check syntax only, no functional change |
-| `GKGamepadState.cs`, `GKLayout.cs`, `GKOemNameOverride.cs`, `GKOutputPacket.cs`, `TimeoutScale.cs`, `VendorBlobProgram.cs`, `UsbipProtocol.cs` | **No differences** other than the namespace |
+| `UsbAudioEngine.cs` | Version semantics bumped to 0.9.8.0; `DeviceOrchestrator.LogDiag` → `Debug.WriteLine`; infers stream state from isochronous traffic when an older filter never forwards `SET_INTERFACE` (upstream 1.10.0 fix) |
+| `VendorBlobCodec.cs`, `VendorBlobProgram.cs` | DualShock 4 fixes synced from upstream 1.10.0: `uint16-le` sensor timestamp, touch packet counter, battery `fullValue`, cable bit, and exact 8-bit trigger digital bits |
+| `HidReportBuilder.cs`, `HidDescriptorBuilder.cs`, `GKOutputDecodedEventArgs.cs`, `GKOutputEncoder.cs`, `GKProfileBuilder.cs` | Wording / minor null-check syntax only, no functional change |
+| `GKGamepadState.cs`, `GKLayout.cs`, `GKOemNameOverride.cs`, `GKOutputPacket.cs`, `TimeoutScale.cs`, `UsbipProtocol.cs` | **No differences** other than the namespace |
+
+#### Upstream fixes synced (HIDMaestro 1.5.1 → 1.12.0)
+
+Only fixes that apply to the pure USB/IP design were taken:
+
+- **Audio stream inference** (`9306fc3`): usbip-win2 0.9.8.1 with an older filter driver never forwards `SET_INTERFACE`; the engine now opens a stream on its first isochronous transfer and closes it about 200 ms after the transfers stop, while an interface that has received `SET_INTERFACE` still follows it alone.
+- **Stable per-controller serials** (`46054b8`, `a396741`): the USB serial varies by controller index, and profiles without a captured serial get a stable synthetic one. Windows keys the USB instance id on it instead of the vhci port.
+- **DualShock 4 reports** (`fd86c1a`): report `0x01` fields sit at SDL/Linux offsets, the sensor timestamp advances in 16/3 µs ticks, battery/full/cable and touch fields follow the real pad, `LT_DIGITAL` / `RT_DIGITAL` follow the 8-bit trigger value, and calibration is the identity (8192/g, 16/°/s) with the DS4 `0x05` ordering.
+
+Not synced because they do not apply or are new personas/features rather than fixes: the UMDF2 driver, `DeviceManager`, XUSB companion, VR / Valve / Switch 2 / keyboard-mouse features, and ARM64 packaging.
 
 ### 5. Build / project differences
 

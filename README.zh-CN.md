@@ -90,22 +90,33 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | --- | --- |
 | `GKContext.cs` | 删除构造函数后台预热；`IsDriverInstalled` → `UsbipBackend.IsAvailable`；`InstallUsbipBackend` 改为 `Install(interactive:false)` 并失败抛异常；`InstallDriver` → `EnsureInstalled()`（不再自动安装）；`RemoveAllVirtualControllers` → `UsbipBackend.DetachAllOwned`；`LoadDefaultProfiles` 改用 `StaticProfileRegistry`；删除 `LoadProfilesFromDirectory`；`CreateController/CreateControllerAt` 一律走 USB/IP 且允许仅有 USB 配置（无 HID 描述符）；`FinalizeNames` 变为 no-op |
 | `GKController.cs` | `_reportBuilder` 可空、新增 `_rawReportBuffer`；`SubmitState` 对无 HID 的厂商 profile 直接返回；删除全部 PID 发布 API；删除 Switch Pro 控制器侧逻辑（移至设备端）；`UsbAudio` 仅在有音频流接口时创建 |
-| `ControllerProfile.cs` | 新增 `SerialNumberString`；删除 `Backend` / `RequiresUsbipBackend`；`UsbConfiguration` 变为每个 profile 都携带的描述符集；`GetOrBuildReportBuilder()` 可返回 null；**删除整个 `ProfileDatabase` 类** |
+| `ControllerProfile.cs` | 新增 `SerialNumberString`；删除 `Backend` / `RequiresUsbipBackend`；`UsbConfiguration` 变为每个 profile 都携带的描述符集；`GetOrBuildReportBuilder()` 可返回 null；**删除整个 `ProfileDatabase` 类**；`FieldSpec` 新增 `Divisor` / `FullValue`，用于同步自 1.10.0 的 DualShock 4 修复 |
 | `SharedMemoryIO.cs` | **删除 PID 状态整套**：PID_STATE 尺寸/偏移常量、`EnsurePidStateMapping`、`WritePidPool/BlockLoad/State`、`ReadPidBlockLoad`、`WritePidReportIds` 及相关句柄与释放逻辑 |
 | `UsbConfigurationSpec.cs` | 新增 `InputReportSize`、`VendorRequests`（含 `VendorControlRequest` 类型）、`Gip`、`ResolutionMultiplier`；注释改为 USB/IP persona 描述符集 |
-| `UsbDescriptorSet.cs` | `ReportDescriptor` 可空、新增 `HasHidInterface` / `InputEndpoint`；解析厂商 0x21 class descriptor；HID 接口改为可选；新增 `GetClassDescriptor`；iSerial 返回真实序列号 |
+| `UsbDescriptorSet.cs` | `ReportDescriptor` 可空、新增 `HasHidInterface` / `InputEndpoint`；解析厂商 0x21 class descriptor；HID 接口改为可选；新增 `GetClassDescriptor`；iSerial 返回真实序列号；按控制器索引变化已捕获的 serial，并为无 serial 的 profile 提供稳定的合成 serial（上游 1.8.0 身份修复） |
 | `UsbipBackend.cs` | `Attach` 传 `UsbipReceiveMode.LowLatency`；`UsbipBackendHandle.Dispose` 增加 `WaitForPortDetached`（含一次重试），避免快速模式切换复用未清理端口 |
 | `UsbipDriverInstaller.cs` | 版本/SHA 升 0.9.8.0；`EnsureInstalled` 改为校验 ABI 并抛「需安装/需重启」异常；新增 `Install(interactive)`、Inno 退出码解析（0/3010）、`NeedsRebootThisBoot` 标记、`WaitForCurrentAbi`、`IsCurrentAbi`；`StampOwnerHardwareId` 改为枚举 `ROOT\USB\0000..000F` 并逐个打标 |
-| `UsbipEmulatedDevice.cs` | 新增 GIP / Switch 两条 input pump 分支、厂商类不透明上报、`vendorRequests`、Resolution Multiplier、DS4 0x20/0x81、DualSense 测试指令；仅应答 `InputEndpoint`；`Audio` 可空；重连/重置清理；GIP 错误日志 |
+| `UsbipEmulatedDevice.cs` | 新增 GIP / Switch 两条 input pump 分支、厂商类不透明上报、`vendorRequests`、Resolution Multiplier、DS4 0x20/0x81、DualSense 测试指令；仅应答 `InputEndpoint`；`Audio` 可空；重连/重置清理；GIP 错误日志；同步上游 1.10.0 的 DualShock 4 `0x01` 偏移与 `0x05` 校准；把接口 / alt setting 传给音频引擎 |
 | `VhciClient.cs` | `plugin_hardware` 结构扩至 1120 字节（新增 serial / wsk_events）、`imported_device` 行 1128 字节；`Attach` 新增 `UsbipReceiveMode` 参数；`Detach` 将 ≤0 归一化为 `PORT_ALL(-1)`；新增 `WaitForPortDetached`、`IsCurrentAbi`、`UsbipReceiveMode` 枚举 |
 | `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；注释版本升 0.9.8.0 |
 | `GKProfile.cs` | 删除 `Backend` / `RequiresUsbipBackend`；`Connection` 改用 `IsNullOrEmpty` 判空；文档由「profile JSON」改为「catalog / 内建」 |
 | `GKLayoutLoader.cs` | 增加 `IL3050` / `IL2026` 抑制与 `System.Diagnostics.CodeAnalysis`，适配 AOT / 裁剪 |
 | `OemNameOverrideStore.cs` | 增加 `CA1416`（仅 Windows）平台兼容抑制 |
 | `GKUsbAudio.cs` | 注释更新；`device.Audio` 改为可空后加 `!` |
-| `UsbAudioEngine.cs` | 版本语义提到 0.9.8.0；`DeviceOrchestrator.LogDiag` → `Debug.WriteLine` |
-| `VendorBlobCodec.cs`、`HidReportBuilder.cs`、`HidDescriptorBuilder.cs`、`GKOutputDecodedEventArgs.cs`、`GKOutputEncoder.cs`、`GKProfileBuilder.cs` | 仅措辞/微小空判断语法，无功能变化 |
-| `GKGamepadState.cs`、`GKLayout.cs`、`GKOemNameOverride.cs`、`GKOutputPacket.cs`、`TimeoutScale.cs`、`VendorBlobProgram.cs`、`UsbipProtocol.cs` | 除命名空间外**无差异** |
+| `UsbAudioEngine.cs` | 版本语义提到 0.9.8.0；`DeviceOrchestrator.LogDiag` → `Debug.WriteLine`；旧 filter 不转发 `SET_INTERFACE` 时，根据等时传输推断流的开启/关闭（上游 1.10.0 修复） |
+| `VendorBlobCodec.cs`、`VendorBlobProgram.cs` | 同步上游 1.10.0 的 DualShock 4 修复：`uint16-le` 传感器时间戳、触摸包计数器、电量 `fullValue`、cable 位，以及按 8 位触发值判定 `LT_DIGITAL` / `RT_DIGITAL` |
+| `HidReportBuilder.cs`、`HidDescriptorBuilder.cs`、`GKOutputDecodedEventArgs.cs`、`GKOutputEncoder.cs`、`GKProfileBuilder.cs` | 仅措辞/微小空判断语法，无功能变化 |
+| `GKGamepadState.cs`、`GKLayout.cs`、`GKOemNameOverride.cs`、`GKOutputPacket.cs`、`TimeoutScale.cs`、`UsbipProtocol.cs` | 除命名空间外**无差异** |
+
+#### 同步自 HIDMaestro 的修复（1.5.1 → 1.12.0）
+
+只采纳适用于纯 USB/IP 架构的修复：
+
+- **音频流推断**（`9306fc3`）：usbip-win2 0.9.8.1 搭配旧 filter 驱动时收不到 `SET_INTERFACE`；引擎改为在首次等时传输时开启流，并在传输停止约 200 ms 后关闭；已经收到过 `SET_INTERFACE` 的接口仍只由它决定状态。
+- **每控制器稳定 serial**（`46054b8`、`a396741`）：USB serial 按控制器索引变化；无捕获 serial 的 profile 生成稳定的合成 serial。Windows 以它作为 USB 实例 ID，而不再依赖 vhci 端口。
+- **DualShock 4 报文**（`fd86c1a`）：`0x01` 各字段落在 SDL/Linux 读取的偏移；传感器时间戳按 16/3 µs 递增；电量/充满/cable 与触摸字段符合真实手柄；`LT_DIGITAL` / `RT_DIGITAL` 按 8 位触发值判定；校准改为单位校准（8192/g、16/°/s），并提供 DS4 的 `0x05` 顺序。
+
+以下内容未同步（不适用，或属于新人格/新功能而非修复）：UMDF2 驱动、`DeviceManager`、XUSB companion、VR / Valve / Switch 2 / 键盘鼠标功能，以及 ARM64 打包。
 
 ### 5. 构建 / 工程差异
 
