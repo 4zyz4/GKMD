@@ -128,7 +128,7 @@ Not synced because they do not apply or are new personas/features rather than fi
 | Resource logical names | `HIDMaestro.Resources.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native driver first to populate `Resources/`, then `dotnet build` twice to embed) | Not required; resources are fixed files |
-| Version | Upstream version number (1.x) | `4.5.2.0` (follows GKME) |
+| Version | Upstream version number (1.x) | `4.6.1.0` (follows GKME) |
 | AOT / trimming | Not annotated for AOT | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); the host publishes with `PublishAot` |
 | Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
 

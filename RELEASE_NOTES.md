@@ -1,5 +1,131 @@
 # Release notes
 
+## v4.6.1 — 2026-10-17 — HIDMaestro 1.12.0 fixes
+
+**English** | [简体中文](#v461--2026-10-17--同步-hidmaestro-1120-修复)
+
+GKMD 4.6.1 syncs the USB/IP-relevant fixes that landed in HIDMaestro after
+1.5.1, up to 1.12.0, and follows GKME 4.6.1.
+
+### Highlights
+
+- **Audio stream inference** — a usbip-win2 0.9.8.1 host controller driver
+  paired with an older filter driver never forwards `SET_INTERFACE`, while the
+  audio itself flows. An interface that has never received `SET_INTERFACE` is
+  now opened by its first isochronous transfer and closed about 200 ms after
+  the transfers stop; once the host delivers a `SET_INTERFACE`, only that
+  decides the stream state.
+- **Stable per-controller serials** — a captured serial varies by controller
+  index, and personas without one get a stable synthetic serial. Windows keys
+  the USB instance id on the serial instead of the vhci port, so a device comes
+  back at the same path across dispose/recreate, process restart and reboot.
+- **DualShock 4 reports** — report `0x01` fields sit at the SDL/Linux offsets,
+  the sensor timestamp advances in 16/3 µs ticks, battery/full/cable and touch
+  fields follow the real pad, `LT_DIGITAL` / `RT_DIGITAL` follow the 8-bit
+  trigger value, and calibration is the identity (8192/g, 16/°/s) with the DS4
+  `0x05` ordering.
+
+### Compatibility
+
+- Controller personas are unchanged (Xbox One / Series X|S, Xbox 360,
+  Switch Pro / Joy-Con, DualShock 4, DualSense, wheel, keyboard, mouse).
+- Works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or 0.9.8.1**.
+
+### Artifact
+
+| File | Size | Notes |
+| --- | --- | --- |
+| `GKMD-v4.6.1.zip` | 25,420,883 bytes | Contains `GKMD.dll` (Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1), `LICENSE` and `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256: `D306D60EDDA7F43822A2590F3476AD80E6D766D39EAC747956D054A0979A09E8`
+
+Produced by `dotnet build -c Release -t:PackageRelease`; Native AOT compilation
+happens in the host application (GKME), not in this library.
+
+### Build / verify
+
+```powershell
+dotnet build -c Release
+dotnet build -c Release -t:PackageRelease
+dotnet publish -c Release -r win-x64 -p:PublishAot=true   # from a host project referencing GKMD.csproj
+```
+
+### Known limitations
+
+- The bundled usbip-win2 payload is x64-only.
+- Windows only (`net10.0-windows`).
+- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
+  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
+
+### Credits & license
+
+Derived from HIDMaestro 1.5.1 (MIT); the original copyright notice is retained
+in [LICENSE](LICENSE). Bundled usbip-win2 is BSD-2-Clause, see
+[Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt).
+
+---
+
+## v4.6.1 — 2026-10-17 — 同步 HIDMaestro 1.12.0 修复
+
+[English](#v461--2026-10-17--hidmaestro-1120-fixes) | **简体中文**
+
+GKMD 4.6.1 同步 HIDMaestro 在 1.5.1 之后至 1.12.0 中适用于 USB/IP 架构的修复，
+跟随 GKME 4.6.1 发布。
+
+### 亮点
+
+- **音频流推断** — usbip-win2 0.9.8.1 主控驱动搭配旧 filter 驱动时收不到
+  `SET_INTERFACE`，但音频本身仍在传输。从未收到 `SET_INTERFACE` 的接口现在由首次
+  等时传输开启，并在传输停止约 200 ms 后关闭；一旦宿主送达 `SET_INTERFACE`，流状态
+  只由它决定。
+- **每控制器稳定 serial** — 已捕获的 serial 按控制器索引变化，无 serial 的 persona
+  生成稳定的合成 serial。Windows 以 serial 而非 vhci 端口作为 USB 实例 ID，设备在
+  销毁重建、进程重启与重启系统后回到同一路径。
+- **DualShock 4 报文** — `0x01` 各字段落在 SDL/Linux 读取的偏移，传感器时间戳按
+  16/3 µs 递增，电量/充满/cable 与触摸字段符合真实手柄，`LT_DIGITAL` /
+  `RT_DIGITAL` 按 8 位触发值判定，校准为单位校准（8192/g、16/°/s）并提供 DS4
+  `0x05` 顺序。
+
+### 兼容性
+
+- 各手柄人格不变（Xbox One / Series X|S、Xbox 360、Switch Pro / Joy-Con、
+  DualShock 4、DualSense、方向盘、键盘、鼠标）。
+- 兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**。
+
+### 产物
+
+| 文件 | 大小 | 说明 |
+| --- | --- | --- |
+| `GKMD-v4.6.1.zip` | 25,420,883 字节 | 内含 `GKMD.dll`（Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256：`D306D60EDDA7F43822A2590F3476AD80E6D766D39EAC747956D054A0979A09E8`
+
+由 `dotnet build -c Release -t:PackageRelease` 生成；Native AOT 编译在宿主应用
+（GKME）中完成，而非本类库。
+
+### 构建 / 验证
+
+```powershell
+dotnet build -c Release
+dotnet build -c Release -t:PackageRelease
+dotnet publish -c Release -r win-x64 -p:PublishAot=true   # 在引用 GKMD.csproj 的宿主工程中执行
+```
+
+### 已知限制
+
+- 内嵌的 usbip-win2 载荷仅支持 x64。
+- 仅支持 Windows（`net10.0-windows`）。
+- layout 序列化/反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT 宿主中，
+  `GKLayout*` 类型需由宿主保留。
+
+### 致谢与许可
+
+派生自 HIDMaestro 1.5.1（MIT），原始版权声明保留在 [LICENSE](LICENSE)；
+捆绑的 usbip-win2 为 BSD-2-Clause，见
+[Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt)。
+
+---
+
 ## v4.5.2 — 2026-10-10 — usbip-win2 0.9.8.1 support
 
 **English** | [简体中文](#v452--2026-10-10--支持-usbip-win2-0981)
