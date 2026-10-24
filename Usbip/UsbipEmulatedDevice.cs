@@ -87,6 +87,12 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private IntPtr _inputWaitEvent;
     private readonly Thread _inputThread;
     private volatile bool _stop;
+    private int _disposed;
+
+    /// <summary>True once Dispose has begun. The server ends the connection
+    /// at the next command, and the input pump stops, so a device disposed
+    /// under an open import answers nothing more.</summary>
+    internal bool IsDisposed => _stop;
 
     // The connection's serialized sender; null until attached. Claimed
     // and released with CompareExchange so a racing second import can
@@ -206,10 +212,22 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// <summary>Claim this device for one connection. A second import
     /// while attached is refused ST_DEV_BUSY by the server.</summary>
     public bool TryClaimConnection(UsbipServer.Connection connection)
-        => Interlocked.CompareExchange(ref _connection, connection, null) == null;
+    {
+        // A device disposed after the server found it is gone.
+        if (_stop) return false;
+        if (Interlocked.CompareExchange(ref _connection, connection, null) != null)
+            return false;
+        if (_stop)
+        {
+            Interlocked.CompareExchange(ref _connection, null, connection);
+            return false;
+        }
+        return true;
+    }
 
     public void DetachConnection(UsbipServer.Connection connection)
     {
+        if (_stop) return; // Dispose released the device already
         if (Interlocked.CompareExchange(ref _connection, null, connection) != connection)
             return; // a different connection owns the device
         Audio?.Clear();
@@ -1206,6 +1224,20 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 }
                 if (reportType == 0x01)
                 {
+                    // A report ID the descriptor does not declare is a value
+                    // the request cannot take, which USB 2.0 9.2.7 answers
+                    // with a STALL. Every GKMD HID persona declares one
+                    // input report.
+                    if (_builder != null)
+                    {
+                        byte declaredId = _builder.InputReportId;
+                        bool declared = declaredId == 0 ? reportId == 0 : reportId == declaredId;
+                        if (!declared)
+                        {
+                            SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+                            return;
+                        }
+                    }
                     byte[] snapshot;
                     lock (_hidLock) snapshot = _lastInputReport;
                     int n = Math.Min(snapshot.Length, wLength);
@@ -1792,8 +1824,14 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _stop = true;
         _connection = null;
+        // The input pump waits up to 500 ms for a frame and sees _stop only
+        // when it wakes. Wake it now, so Dispose does not wait out its
+        // timeout. A second Dispose returns above, and a dispose racing the
+        // host's detach releases the device first.
+        if (_inputWaitEvent != IntPtr.Zero) SetEvent(_inputWaitEvent);
         Audio?.Dispose();
         try { _inputThread.Join(600); } catch { }
         if (_inputWaitEvent != IntPtr.Zero)

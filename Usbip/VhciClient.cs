@@ -246,21 +246,86 @@ internal static class VhciClient
         return false;
     }
 
+    /// <summary>Whether an import's service string names this port. The
+    /// string is whatever the PLUGIN request carried, so "018509" or
+    /// " 18509" can name port 18509 as well as "18509" does. Compared as a
+    /// number, the way the sweeps decide a row is on the SDK's ports, so
+    /// every import a sweep picks is one it can detach.</summary>
+    public static bool SamePort(string service, int port) =>
+        int.TryParse(service, out int parsed) && parsed == port;
+
+    /// <summary>The vhci port of one exact location's import, or 0 when
+    /// nothing is imported there. A vhci port number names whatever device
+    /// holds the port now, so detaching by location is how a stale import is
+    /// removed without touching a device that took the port since.</summary>
+    public static int FindLocation(string host, int port, string busid)
+    {
+        foreach (var row in GetImportedDevices())
+            if (row.Host == host && SamePort(row.Service, port) && row.BusId == busid) return row.Port;
+        return 0;
+    }
+
+    /// <summary>Detach the imports of one exact location, wherever the
+    /// driver plugged them in. Returns how many it detached.</summary>
+    public static int DetachLocation(string host, int port, string busid)
+    {
+        int detached = 0;
+        foreach (var row in GetImportedDevices())
+        {
+            if (row.Host != host || !SamePort(row.Service, port) || row.BusId != busid) continue;
+            Detach(row.Port);
+            detached++;
+        }
+        return detached;
+    }
+
+    /// <summary>Wait, bounded, until one exact location no longer appears in
+    /// the imported-device list. The location can move to another vhci port
+    /// after a dropped connection, so this looks the location up each time
+    /// rather than watching the port the attach returned.</summary>
+    public static bool WaitForLocationDetached(string host, int port, string busid, int timeoutMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (FindLocation(host, port, busid) == 0) return true;
+            System.Threading.Thread.Sleep(40);
+        }
+        return false;
+    }
+
     /// <summary>Cancel the driver's background re-attach attempts for one
     /// exact location. Safe to call when none exist.</summary>
     public static void StopAttachAttempts(string host, int port, string busid)
+        => StopAttachAttempts(host, new[] { (port, busid) });
+
+    /// <summary>The same for several locations on one handle. The driver
+    /// keys an attempt by the hash of host, port and bus id and cancels by
+    /// that exact hash, so every location is one request. Opens the host
+    /// controller once, which keeps a sweep of many dead locations cheap.
+    /// Safe to call when none exist.</summary>
+    public static int StopAttachAttempts(string host,
+        IReadOnlyCollection<(int Port, string BusId)> locations)
     {
+        if (locations.Count == 0) return 0;
         try
         {
             using var h = Open();
             var layout = Probe(h.Handle, out _, out _);
             var buf = new byte[layout.StopSize];
-            BitConverter.GetBytes((uint)layout.StopSize).CopyTo(buf, 0);
-            WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
-            DeviceIoControl(h.Handle, STOP_ATTACH_ATTEMPTS, buf, (uint)buf.Length,
-                buf, (uint)buf.Length, out _, IntPtr.Zero);
+            int canceled = 0;
+            foreach (var (port, busid) in locations)
+            {
+                Array.Clear(buf);
+                BitConverter.GetBytes((uint)layout.StopSize).CopyTo(buf, 0);
+                WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
+                if (DeviceIoControl(h.Handle, STOP_ATTACH_ATTEMPTS, buf, (uint)buf.Length,
+                        buf, (uint)buf.Length, out _, IntPtr.Zero))
+                    canceled++;
+            }
+            return canceled;
         }
-        catch { /* cleanup path; absence of the driver is fine */ }
+        catch { return -1; /* cleanup path; absence of the driver is fine */ }
     }
 
     /// <summary>True when the installed vhci driver accepts a request

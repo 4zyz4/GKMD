@@ -19,7 +19,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 - Runtime identifiers: `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*`
   → `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*`
 
-> Note: GKMD is the standalone product of a driver branch that evolved over the long term within the GKME project. It is **not** a line-by-line simplified single-file copy of HIDMaestro 1.5.1. This README compares GKMD against the **latest upstream, v2.0.3**, unless a row explicitly says "1.5.1 base". Because GKMD stays on the 1.5.1-derived API, it also lacks the upstream work from 1.6.0 through 2.0.3 that builds on the 2.0 data model; the newest upstream fixes GKMD has synced are from 1.12.0.
+> Note: GKMD is the standalone product of a driver branch that evolved over the long term within the GKME project. It is **not** a line-by-line simplified single-file copy of HIDMaestro 1.5.1. This README compares GKMD against the **latest upstream, v2.0.3**, unless a row explicitly says "1.5.1 base". Because GKMD stays on the 1.5.1-derived API, it lacks the upstream work from 1.6.0 through 2.0.3 that builds on the 2.0 data model; its USB/IP runtime fixes have been synced through 2.0.3.
 
 ## Differences from HIDMaestro 2.0.3
 
@@ -77,6 +77,8 @@ Only fixes that apply to the pure USB/IP design and that existed through 1.12.0 
 - **1.8.0 – 1.12.0**: the identity / audio / DualShock 4 fixes (the USB/IP-relevant ones **are** synced; see below), the Switch 2 Pro with motion (1.11.0), 103 keyboard/mouse profiles and the keyboard/mouse API (1.12.0), and other catalog and persona work.
 - **2.0.0**: devices-as-data report fields, feature answers, protocols and report programs; the `ProgramForm` compiler / interpreter; `deviceModelFrom` models; strict profile validation with JSON paths; `HMPort`; identity keys and leases; `HMBuildInfo`; NativeAOT support; ARM64 driver/transport payloads; the Wii U GameCube adapter; the PS Move and DualShock 3 data forms; the 337-profile catalog.
 - **2.0.1 – 2.0.3**: direct installation of usbip-win2's host controller files without running its installer, `HMUninstall` / `HIDMaestroUninstall.exe`, removal of the usbip-win2 host controller and root-hub filter, and the Valve persona corrections.
+
+The **USB/IP runtime** fixes from 2.0.0 *are* synced (host-controller-only imports, handshake limits, dead-server sweeps, location-based detach, disposal and audio-event hardening; see the sync list in section 7). What GKMD does not carry is the 2.0 data model, the identity/lease system, the 2.0.1–2.0.3 installer/uninstaller, and the perf-only allocation work.
 
 GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the code-defined static registry and the 1.x-derived controller API.
 
@@ -139,17 +141,18 @@ These are the changes GKMD made to the 1.5.1 files. Upstream 2.0.3 has since rew
 | `SharedMemoryIO.cs` | **Removes the whole PID state**: PID_STATE size/offset constants, `EnsurePidStateMapping`, `WritePidPool/BlockLoad/State`, `ReadPidBlockLoad`, `WritePidReportIds` and related handles and disposal logic |
 | `UsbConfigurationSpec.cs` | Adds `InputReportSize`, `VendorRequests` (including the `VendorControlRequest` type), `Gip`, `ResolutionMultiplier`; comments changed to describe a USB/IP persona descriptor set |
 | `UsbDescriptorSet.cs` | `ReportDescriptor` is nullable, adds `HasHidInterface` / `InputEndpoint`; parses the vendor 0x21 class descriptor; the HID interface becomes optional; adds `GetClassDescriptor`; iSerial returns the real serial number; varies a captured serial per controller index and serves a stable synthetic serial for profiles that carry none (upstream 1.8.0 identity fix) |
-| `UsbipBackend.cs` | `Attach` passes `UsbipReceiveMode.LowLatency`; `UsbipBackendHandle.Dispose` adds `WaitForPortDetached` (with one retry) to avoid reusing an uncleaned port during fast mode switching |
+| `UsbipBackend.cs` | `Attach` passes `UsbipReceiveMode.LowLatency`; the stale sweep detaches only imports whose server is gone and cancels only dead locations' attempts; a failed attach detaches a raced import; `UsbipBackendHandle.Dispose` detaches by location, waits for it to leave the list (with one retry) and cancels its attempts |
 | `UsbipDriverInstaller.cs` | Pins **0.9.8.1** and verifies that release's SHA-256; `EnsureInstalled` validates the ABI and throws "needs install / needs reboot" exceptions; adds `Install(interactive)`, Inno exit code parsing (0/3010), `NeedsRebootThisBoot` flag, `WaitForCurrentAbi`, `IsCurrentAbi`; calls `VhciClient.IsCurrentAbi()` so 0.9.8.1 / 0.9.8.0 / 0.9.7.x are all recognized; `StampOwnerHardwareId` enumerates `ROOT\USB\0000..000F` and stamps each |
-| `VhciClient.cs` | Speaks **three vHCI layouts** and probes for the installed one: 0.9.8.1 (`plugin_hardware` 1124, stop 1108, row 1132, `location_hash` after `port`), 0.9.8.0 (1120 / 1104 / 1128) and 0.9.7.x (1100 / 1104 / 1108, no `wsk_events`); `Attach` adds a `UsbipReceiveMode` parameter; `Detach` normalizes ≤0 to `PORT_ALL(-1)`; adds `WaitForPortDetached`, `IsCurrentAbi`, `InstalledLayout`, `UsbipReceiveMode` |
-| `UsbipServer.cs` | `Unregister` adds identity validation (prevents an old device from mistakenly deleting a new one); comments follow the 0.9.8.x wire contract |
-| `UsbipEmulatedDevice.cs` | Adds the GIP / Switch input pump branches, vendor-class opaque reporting, `vendorRequests`, Resolution Multiplier, DS4 0x20/0x81, DualSense test commands; only answers `InputEndpoint`; `Audio` is nullable; reconnect/reset cleanup; GIP error logging; DualShock 4 0x01 offsets and 0x05 calibration from upstream 1.10.0; passes the interface / alternate setting to the audio engine |
+| `VhciClient.cs` | Speaks **three vHCI layouts** and probes for the installed one: 0.9.8.1 (`plugin_hardware` 1124, stop 1108, row 1132, `location_hash` after `port`), 0.9.8.0 (1120 / 1104 / 1128) and 0.9.7.x (1100 / 1104 / 1108, no `wsk_events`); `Attach` adds a `UsbipReceiveMode` parameter; `Detach` normalizes ≤0 to `PORT_ALL(-1)`; adds `WaitForPortDetached`, `DetachLocation`, `FindLocation`, `SamePort`, `WaitForLocationDetached`, batched `StopAttachAttempts`, `IsCurrentAbi`, `InstalledLayout`, `UsbipReceiveMode` |
+| `UsbipServer.cs` | `Unregister` adds identity validation (prevents an old device from mistakenly deleting a new one); adds host-controller-only import admission, handshake deadline and cap, a second port range with an OS-assigned fallback, re-attach cancellation for an unknown bus id, claim cleanup on a failed reply, and an import that ends when its device is disposed |
+| `Usbip/TcpConnectionOwner.cs` | New: maps an accepted loopback connection to its owning PID through `GetExtendedTcpTable`, so only the kernel WSK connection (System, PID 4) may import |
+| `UsbipEmulatedDevice.cs` | Adds the GIP / Switch input pump branches, vendor-class opaque reporting, `vendorRequests`, Resolution Multiplier, DS4 0x20/0x81, DualSense test commands; only answers `InputEndpoint`; `Audio` is nullable; reconnect/reset cleanup; GIP error logging; DualShock 4 0x01 offsets and 0x05 calibration from upstream 1.10.0; passes the interface / alternate setting to the audio engine; `IsDisposed` / claim checks, an idempotent `Dispose` that wakes the input pump, and a STALL for an input report ID the descriptor does not declare |
 | `Usbip/GipResponder.cs` | Xbox One now builds a 230-byte metadata blob from the real 214-byte gamepad metadata by appending the PC security opt-out as a fourth interface (keeping `INavigationController`) and recomputing the device / total / client-command offsets; Xbox One `InputReportSize` corrected from 18 to 14. The previous 182-byte sample metadata made `xboxgip` bugcheck on create |
-| `Usbip/UsbAudioEngine.cs` | Version semantics follow 0.9.8.x; `DeviceOrchestrator.LogDiag` → `Debug.WriteLine`; infers stream state from isochronous traffic when an older filter never forwards `SET_INTERFACE` (upstream 1.10.0 fix); uses bmRequestType 0x80 for the 0.9.8.1 filter |
+| `Usbip/UsbAudioEngine.cs` | Version semantics follow 0.9.8.x; `DeviceOrchestrator.LogDiag` → `Debug.WriteLine`; infers stream state from isochronous traffic when an older filter never forwards `SET_INTERFACE` (upstream 1.10.0 fix); uses bmRequestType 0x80 for the 0.9.8.1 filter; control and stream changes run on a dedicated event thread in host order, and handler exceptions are dropped |
 | `GKProfile.cs` | Removes `Backend` / `RequiresUsbipBackend`; `Connection` uses `IsNullOrEmpty` for null checks; docs changed from "profile JSON" to "catalog / built-in" |
 | `GKLayoutLoader.cs` | Adds `IL3050` / `IL2026` suppressions and `System.Diagnostics.CodeAnalysis`, adapting to AOT / trimming |
 | `OemNameOverrideStore.cs` | Adds the `CA1416` (Windows-only) platform compatibility suppression |
-| `GKUsbAudio.cs` | Comment update; adds `!` to `device.Audio` now that it is nullable |
+| `GKUsbAudio.cs` | Comment update; adds `!` to `device.Audio` now that it is nullable; raises public audio events per handler, dropping an exception instead of ending the audio thread or connection |
 | `VendorBlobCodec.cs`, `VendorBlobProgram.cs` | DualShock 4 fixes synced from upstream 1.10.0: `uint16-le` sensor timestamp, touch packet counter, battery `fullValue`, cable bit, and exact 8-bit trigger digital bits |
 | `HidReportBuilder.cs`, `HidDescriptorBuilder.cs`, `GKOutputDecodedEventArgs.cs`, `GKOutputEncoder.cs`, `GKProfileBuilder.cs` | Wording / minor null-check syntax only, no functional change |
 | `GKGamepadState.cs`, `GKLayout.cs`, `GKOemNameOverride.cs`, `GKOutputPacket.cs`, `TimeoutScale.cs`, `UsbipProtocol.cs` | **No differences** other than the namespace |
@@ -162,9 +165,26 @@ Only fixes that apply to the pure USB/IP design were taken:
 - **Stable per-controller serials** (`46054b8`, `a396741`): the USB serial varies by controller index, and profiles without a captured serial get a stable synthetic one. Windows keys the USB instance id on it instead of the vhci port.
 - **DualShock 4 reports** (`fd86c1a`): report `0x01` fields sit at SDL/Linux offsets, the sensor timestamp advances in 16/3 µs ticks, battery/full/cable and touch fields follow the real pad, `LT_DIGITAL` / `RT_DIGITAL` follow the 8-bit trigger value, and calibration is the identity (8192/g, 16/°/s) with the DS4 `0x05` ordering.
 
+#### Upstream USB/IP fixes synced (1.12.0 → 2.0.3)
+
+These are the 2.0.0 changes that live entirely in the USB/IP transport and device layer, so they port without the 2.0 data model:
+
+- **Host-controller-only imports** (`TcpConnectionOwner`): the server admits an `OP_REQ_IMPORT` only when the client end belongs to the System process (PID 4), which is how the kernel WSK connection appears. A local program can no longer import a persona from another process.
+- **Handshake limits**: a connection must finish its import handshake within 5 s, and at most 16 handshakes run at once; connections beyond that are closed without a thread unless the host controller opened them.
+- **Port exhaustion**: after `18509..18524`, the server tries `28509..28524`, then an OS-assigned loopback port, instead of failing every composite persona.
+- **Dead-server sweeps**: a sweep detaches only imports on a port with no listener (or on this process's own port whose bus id it does not export), and cancels re-attach attempts only for those dead locations. A live program's server and imports are left alone.
+- **Location-based detach**: `DetachLocation` / `FindLocation` / `WaitForLocationDetached` detach and wait by `(host, server port, bus id)` rather than by a vhci port that may have been reused by another device.
+- **Registration gate**: registrations wait while the stale sweep runs, so a new device cannot attach at a location the sweep is about to detach.
+- **Attach/import cleanup**: a failed attach detaches a raced import and cancels its attempt; the server holds the device claim from before the import reply, so a failed reply cannot leave the bus id stuck `ST_DEV_BUSY`.
+- **Disposal**: a disposed device ends its open import, the handle detaches by location and cancels the location's attempts, `Dispose` wakes the input pump instead of waiting out its 500 ms frame wait, and a second `Dispose` returns.
+- **Audio event isolation**: control and stream changes are raised on a dedicated audio event thread in host order, so a slow handler cannot block the connection reader or the audio pump; an exception a handler throws is dropped instead of ending the connection or the process.
+- **GET_REPORT(Input)**: a report ID the HID descriptor does not declare is answered with a STALL instead of the last report.
+
+Not synced from 2.0.x because they do not apply or are outside the USB/IP runtime: the zero-allocation control/frame paths (performance only), owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), ARM64 payloads, and the 2.0 data model.
+
 #### Upstream work after 1.12.0 not synced (1.12.0 → 2.0.3)
 
-- **2.0.0** replaces the device layer with JSON data and compiled programs, adds strict profile validation with JSON paths, `HMPort`, identity keys/leases, NativeAOT, ARM64 payloads, the Wii U GameCube adapter and 337 profiles. These are architectural changes, not fixes that can be ported into GKMD's static C# registry.
+- **2.0.0** replaces the device layer with JSON data and compiled programs, adds strict profile validation with JSON paths, `HMPort`, identity keys/leases, NativeAOT, ARM64 payloads, the Wii U GameCube adapter and 337 profiles. These are architectural changes, not fixes that can be ported into GKMD's static C# registry. Its USB/IP runtime fixes are listed above and are synced.
 - **2.0.1 – 2.0.3** install usbip-win2's host controller files directly, add `HMUninstall` and removal of usbip-win2's host controller and root-hub filter, and correct the Valve personas. GKMD deliberately keeps the official usbip-win2 installer and the probe-only install policy, and has no Valve personas to correct.
 - 1.6.0 – 1.12.0 features such as VR, Valve personas, Switch 2 Pro, keyboard/mouse profiles, PS Move and DualShock 3 pressure are new personas or APIs rather than fixes; see section 4.
 
@@ -182,7 +202,7 @@ GKMD/
 ├── StaticProfileRegistry.cs    # Built-in profiles (constructed in code)
 ├── TimeoutScale.cs / GKLayout.cs / GKLayoutLoader.cs / ...
 ├── Usbip/                      # USB/IP backend
-│   ├── UsbipBackend.cs / UsbipServer.cs / VhciClient.cs
+│   ├── UsbipBackend.cs / UsbipServer.cs / VhciClient.cs / TcpConnectionOwner.cs
 │   ├── UsbipEmulatedDevice.cs  # Device-side behavior (HID / GIP / Switch / vendor)
 │   ├── UsbDescriptorSet.cs / UsbConfigurationSpec.cs
 │   ├── UsbipDriverInstaller.cs # Deploy/upgrade usbip-win2

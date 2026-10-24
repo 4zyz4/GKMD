@@ -22,7 +22,12 @@ namespace GKMD.Internal.Usbip;
 /// the vhci driver starts background re-attach attempts when a connection
 /// drops without a PLUGOUT (usbip-win2 device.cpp detach →
 /// start_attach_attempts), and STOP_ATTACH_ATTEMPTS needs the exact
-/// location to cancel them.</para></summary>
+/// location to cancel them. When every port in the range is taken, the
+/// server takes the first free port of a second range,
+/// <see cref="SecondBasePort"/>..+15, and only when that is full too an
+/// OS-assigned port. Both ranges sit below Windows' default dynamic port
+/// range, so a port a dead server held is in practice another GKMD server
+/// rather than an unrelated listener.</para></summary>
 internal sealed class UsbipServer : IDisposable
 {
     /// <summary>0x484D, "GK". Outside the IANA ephemeral range, no
@@ -31,6 +36,19 @@ internal sealed class UsbipServer : IDisposable
     public const int BasePort = 18509;
     public const int PortRange = 16;
 
+    /// <summary>The second range, taken when the first is full. Unassigned
+    /// in the IANA registry (28241-28588), below the dynamic range.</summary>
+    public const int SecondBasePort = 28509;
+
+    /// <summary>How long a connection has to finish its handshake, the
+    /// device list it asks for or the import reply it waits for, before the
+    /// server closes it.</summary>
+    internal const int HandshakeDeadlineMs = 5000;
+
+    /// <summary>Connections in their handshake at once before the server
+    /// closes new ones from user mode as they arrive.</summary>
+    internal const int MaxHandshakes = 16;
+
     private static readonly object s_lock = new();
     private static UsbipServer? s_instance;
 
@@ -38,7 +56,16 @@ internal sealed class UsbipServer : IDisposable
     private readonly Thread _acceptThread;
     private readonly Dictionary<string, UsbipEmulatedDevice> _devices = new();
     private readonly List<Connection> _connections = new();
+    private readonly object _registerGate = new();
+    private int _handshakes;
     private volatile bool _stop;
+
+    /// <summary>Test-only. The probes that play the host controller over
+    /// loopback in process own their sockets in this process. Set, it
+    /// admits a connection this process owns as it admits the host
+    /// controller's. A program in another process cannot set it, and it
+    /// admits no connection another process owns.</summary>
+    internal static volatile bool AdmitImportsFromThisProcess;
 
     public int Port { get; }
 
@@ -60,20 +87,39 @@ internal sealed class UsbipServer : IDisposable
         Exception? last = null;
         TcpListener? listener = null;
         int port = 0;
-        for (int i = 0; i < PortRange; i++)
+        foreach (int first in new[] { BasePort, SecondBasePort })
         {
+            for (int i = 0; i < PortRange && listener == null; i++)
+            {
+                try
+                {
+                    var l = new TcpListener(IPAddress.Loopback, first + i);
+                    l.Start();
+                    listener = l;
+                    port = first + i;
+                }
+                catch (SocketException ex) { last = ex; }
+            }
+            if (listener != null) break;
+        }
+        if (listener == null)
+        {
+            // Every port in both ranges is taken: another program, which may
+            // not be elevated, bound all of them first. Rather than fail
+            // every composite persona, bind an OS-assigned loopback port
+            // (port 0).
             try
             {
-                var l = new TcpListener(IPAddress.Loopback, BasePort + i);
+                var l = new TcpListener(IPAddress.Loopback, 0);
                 l.Start();
                 listener = l;
-                port = BasePort + i;
-                break;
+                port = ((IPEndPoint)l.LocalEndpoint).Port;
             }
             catch (SocketException ex) { last = ex; }
         }
         _listener = listener ?? throw new InvalidOperationException(
-            $"No free USB/IP server port in {BasePort}..{BasePort + PortRange - 1}.", last);
+            $"No free loopback port for the USB/IP server ({BasePort}..{BasePort + PortRange - 1}, " +
+            $"{SecondBasePort}..{SecondBasePort + PortRange - 1} and an OS-assigned port all failed).", last);
         Port = port;
 
         _acceptThread = new Thread(AcceptLoop)
@@ -86,7 +132,23 @@ internal sealed class UsbipServer : IDisposable
 
     public void Register(UsbipEmulatedDevice device)
     {
+        lock (_registerGate)
         lock (_devices) _devices[device.BusId] = device;
+    }
+
+    /// <summary>Run <paramref name="sweep"/> while <see cref="Register"/>
+    /// waits. The stale sweep lists the imports, reads what the server
+    /// exports, and then detaches each listed import whose bus id it does
+    /// not export, by location. A device disposed after the listing frees
+    /// its transport index, and a create on another thread can take that
+    /// index, register the same bus id after the export read and attach
+    /// before the sweep reaches the old row: the detach by location would
+    /// then plug out the new import. No device registers until the sweep
+    /// ends, so none is attached at a location the sweep is about to
+    /// detach.</summary>
+    internal void HoldingRegistrations(Action sweep)
+    {
+        lock (_registerGate) sweep();
     }
 
     public void Unregister(UsbipEmulatedDevice device)
@@ -109,11 +171,37 @@ internal sealed class UsbipServer : IDisposable
             try { client = _listener.AcceptSocket(); }
             catch { break; }
             client.NoDelay = true;
+            // Any local program can connect. Each connection holds a thread
+            // only until its handshake deadline, and past MaxHandshakes in
+            // their handshake at once a new one is closed here, without a
+            // thread, unless the host controller opened it. The driver
+            // connects once per attach it runs, and runs them one at a time
+            // (vhci_ioctl.cpp, the sequential default queue), so a flood
+            // from user mode never turns an import away.
+            if (Interlocked.Increment(ref _handshakes) > MaxHandshakes && !IsHostController(client))
+            {
+                Interlocked.Decrement(ref _handshakes);
+                try { client.Close(); } catch { }
+                continue;
+            }
             var conn = new Connection(this, client);
             lock (_connections) _connections.Add(conn);
             var t = new Thread(conn.Run) { IsBackground = true, Name = "GKUsbipConn" };
             t.Start();
         }
+    }
+
+    /// <summary>Whether the host controller opened this connection: its
+    /// client end is owned by the System process. Only that connection may
+    /// import a device, since an import carries the device's input, a
+    /// keyboard persona's typed keys included, and an import from anywhere
+    /// else would also turn the host controller's own away ST_DEV_BUSY.
+    /// </summary>
+    private static bool IsHostController(Socket client)
+    {
+        int pid = TcpConnectionOwner.OfPeer(client);
+        return pid == TcpConnectionOwner.SystemProcessId
+            || (AdmitImportsFromThisProcess && pid == Environment.ProcessId);
     }
 
     private UsbipEmulatedDevice? Find(string busid)
@@ -156,10 +244,40 @@ internal sealed class UsbipServer : IDisposable
         private readonly object _sendLock = new();
         private UsbipEmulatedDevice? _device;
 
+        // The handshake's deadline. The timer closes the socket only while
+        // the connection is still in its handshake, and whichever of the
+        // timer and the handshake moves the phase first decides.
+        private const int InHandshake = 0, Answered = 1, Expired = 2;
+        private int _phase;
+        private readonly Timer _deadline;
+        // 1 while the connection counts toward the server's handshakes.
+        private int _counted = 1;
+
         public Connection(UsbipServer server, Socket socket)
         {
             _server = server;
             _socket = socket;
+            _deadline = new Timer(static s => ((Connection)s!).Expire(), this, HandshakeDeadlineMs, Timeout.Infinite);
+        }
+
+        private void Expire()
+        {
+            if (Interlocked.CompareExchange(ref _phase, Expired, InHandshake) == InHandshake) Close();
+        }
+
+        /// <summary>End the handshake: the deadline no longer applies. False
+        /// when the deadline came first and closed the socket.</summary>
+        private bool LeaveHandshake()
+        {
+            bool left = Interlocked.CompareExchange(ref _phase, Answered, InHandshake) == InHandshake;
+            _deadline.Dispose();
+            Uncount();
+            return left;
+        }
+
+        private void Uncount()
+        {
+            if (Interlocked.Exchange(ref _counted, 0) == 1) Interlocked.Decrement(ref _server._handshakes);
         }
 
         public void Close()
@@ -189,12 +307,24 @@ internal sealed class UsbipServer : IDisposable
                 ReadExactly(busidBuf);
                 string busid = UsbipProtocol.ReadFixedUtf8(busidBuf);
 
-                var device = _server.Find(busid);
                 Span<byte> reply = stackalloc byte[8 + UsbipProtocol.UsbipUsbDeviceSize];
+                if (!IsHostController(_socket))
+                {
+                    // ST_NA, before the bus id is looked up, so the answer
+                    // says nothing about what this server exports.
+                    UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StNa);
+                    Send(reply[..8]);
+                    return;
+                }
+
+                var device = _server.Find(busid);
                 if (device == null)
                 {
                     UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StNodev);
                     Send(reply[..8]);
+                    // The wait for the controller's close has its own bound.
+                    LeaveHandshake();
+                    CancelAttempt(busid);
                     return;
                 }
                 if (!device.TryClaimConnection(this))
@@ -207,11 +337,17 @@ internal sealed class UsbipServer : IDisposable
                     return;
                 }
 
+                // Held from the claim on, so the finally releases the claim
+                // on every path out, a reply that fails to send included:
+                // a claim left on a dead connection answers every later
+                // import of the bus id ST_DEV_BUSY.
+                _device = device;
+
                 UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StOk);
                 WriteDeviceBlock(reply[8..], device);
                 Send(reply);
+                if (!LeaveHandshake()) return;
 
-                _device = device;
                 CommandLoop(device);
             }
             catch
@@ -220,10 +356,33 @@ internal sealed class UsbipServer : IDisposable
             }
             finally
             {
+                _deadline.Dispose();
+                Uncount();
                 _device?.DetachConnection(this);
                 _server.OnConnectionClosed(this);
                 Close();
             }
+        }
+
+        /// <summary>An import of a bus id this server does not export is a
+        /// re-attach attempt the host controller keeps for a server that
+        /// held this port before, or for a device this server has since
+        /// removed. Answered ST_NODEV it tries again, for about two hours
+        /// (persistent.cpp can_reattach, on_plugin_hardware). It is canceled
+        /// by its exact location once the controller closes this
+        /// connection: the controller completes the attempt, which re-arms
+        /// its timer, before it closes the socket (vhci_ioctl.cpp complete,
+        /// workitem_cleanup).</summary>
+        private void CancelAttempt(string busid)
+        {
+            try
+            {
+                _socket.ReceiveTimeout = 5000;
+                Span<byte> one = stackalloc byte[1];
+                _socket.Receive(one, SocketFlags.None);
+            }
+            catch { /* closed, reset or timed out: cancel all the same */ }
+            VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, busid);
         }
 
         private void WriteDeviceBlock(Span<byte> b, UsbipEmulatedDevice device)
@@ -283,6 +442,10 @@ internal sealed class UsbipServer : IDisposable
             while (true)
             {
                 ReadExactly(header);
+                // A device disposed under an open connection answers nothing
+                // more. Ending the connection lets usbip-win2 detach it, and
+                // the re-attach that follows finds no device.
+                if (device.IsDisposed) return;
                 var cmd = UsbipProtocol.ParseHeader(header);
 
                 if (cmd.Command == UsbipProtocol.CmdSubmit)

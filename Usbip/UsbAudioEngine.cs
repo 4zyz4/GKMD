@@ -129,10 +129,37 @@ internal sealed class UsbAudioEngine : IDisposable
     private long _nextInferCheck;                       // pump thread only
     private readonly List<byte> _inferClosing = new(4); // pump thread only
 
-    // AltSettingChanged reports the current setting, never a stale one:
-    // the raise re-reads the state under its own lock, and a value equal to
-    // the last one raised is not raised again.
-    private readonly object _altEventLock = new();
+    // The control and stream events wait here, in the order the changes
+    // happened, for the engine's event thread, which raises them. A
+    // consumer's handler runs there, so one that blocks stalls no transfer:
+    // the connection's reader takes the host's commands and the pump paces
+    // the audio as before. Guarded by _lock. The queue holds structs, so an
+    // event allocates nothing once it has grown. The thread starts with the
+    // first event and closes its own wake event as it ends. Dispose closes
+    // the wake event of an engine whose thread never started. A change
+    // queued before Dispose is still raised.
+    private readonly struct AudioEvent
+    {
+        public readonly bool IsControl;
+        public readonly byte A, B, C;   // a control's unit, selector and channel, or a stream's interface and alternate setting
+        public readonly short Value;
+        public AudioEvent(bool isControl, byte a, byte b, byte c, short value)
+        {
+            IsControl = isControl; A = a; B = b; C = c; Value = value;
+        }
+    }
+
+    // At most one control write per control waits here, the newest: a
+    // write to a control that has one waiting replaces it, at the back, so
+    // a host that keeps writing while a handler blocks does not grow the
+    // queue. Stream changes all wait, in order.
+    private readonly List<AudioEvent> _events = new();
+    private Thread? _eventThread;
+    private readonly AutoResetEvent _eventWake = new(false);
+    private bool _eventWakeClosed;
+
+    // The alternate setting last raised per interface, so a setting equal
+    // to the last one is not raised again. The event thread's alone.
     private readonly Dictionary<byte, byte> _altRaised = new();
 
     public UsbAudioEngine(ControllerProfile profile, Action<PendingIso, byte[]?, int> complete)
@@ -194,9 +221,11 @@ internal sealed class UsbAudioEngine : IDisposable
     public void SubmitIso(PendingIso urb)
     {
         long now = Stopwatch.GetTimestamp();
-        bool opened = false;
         lock (_lock)
         {
+            // After Dispose the pump has ended, or is ending and closing its
+            // event.
+            if (_stop) return;
             ref long cursor = ref urb.IsIn ? ref _inCursor : ref _outCursor;
             if (cursor < now - 50 * TicksPerMs) cursor = now; // (re)anchor
             cursor += urb.Packets.Length * TicksPerMs;
@@ -211,12 +240,11 @@ internal sealed class UsbAudioEngine : IDisposable
                 {
                     _altSetting[iface] = urb.AltSetting;
                     _inferredOpen.Add(iface);
-                    opened = true;
+                    QueueAltLocked(iface, urb.AltSetting);
                 }
             }
+            _wake.Set();
         }
-        _wake.Set();
-        if (opened) RaiseAltChanged(urb.InterfaceNumber);
     }
 
     /// <summary>Remove a pending URB by seqnum (CMD_UNLINK). Returns true
@@ -273,26 +301,127 @@ internal sealed class UsbAudioEngine : IDisposable
                 _outCursor = 0;
                 _inCursor = 0;
             }
+            QueueAltLocked(interfaceNumber, altSetting);
         }
-        RaiseAltChanged(interfaceNumber);
     }
 
-    private void RaiseAltChanged(byte interfaceNumber)
+    /// <summary>Queue a stream state change for the event thread. Caller
+    /// holds <see cref="_lock"/>.</summary>
+    private void QueueAltLocked(byte interfaceNumber, byte altSetting)
+        => QueueEventLocked(new AudioEvent(false, interfaceNumber, altSetting, 0, 0));
+
+    /// <summary>Caller holds <see cref="_lock"/>. After Dispose nothing is
+    /// raised.</summary>
+    private void QueueEventLocked(in AudioEvent e)
     {
-        if (_stop) return;
-        lock (_altEventLock)
+        if (_stop || _eventWakeClosed) return;
+        if (e.IsControl)
         {
-            byte alt;
-            lock (_lock) alt = _altSetting.TryGetValue(interfaceNumber, out var a) ? a : (byte)0;
-            if (_altRaised.TryGetValue(interfaceNumber, out var last) && last == alt) return;
-            _altRaised[interfaceNumber] = alt;
-            AltSettingChanged?.Invoke(interfaceNumber, alt);
+            for (int i = 0; i < _events.Count; i++)
+            {
+                var queued = _events[i];
+                if (queued.IsControl && queued.A == e.A && queued.B == e.B && queued.C == e.C)
+                {
+                    _events.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+        try
+        {
+            _events.Add(e);
+        }
+        catch (OutOfMemoryException)
+        {
+            // The queue could not grow. The change is dropped, and the
+            // connection's reader gets no exception.
+            Debug.WriteLine("UsbAudioEngine: dropped a change: out of memory to queue it");
+            return;
+        }
+        if (_eventThread == null && !TryStartEventsLocked()) return;
+        _eventWake.Set();
+    }
+
+    /// <summary>Starts the event thread. Caller holds <see cref="_lock"/>.
+    /// False when the process cannot start a thread, being out of threads or
+    /// memory. The connection's reader gets no exception and goes on
+    /// answering the host, the queue keeps its changes, and the next change
+    /// or Dispose tries again.</summary>
+    private bool TryStartEventsLocked()
+    {
+        Thread events;
+        try
+        {
+            events = new Thread(EventLoop)
+            {
+                IsBackground = true,
+                Name = "GKUsbipAudioEvents",
+            };
+            events.Start();
+        }
+        catch (Exception ex) when (ex is OutOfMemoryException or ThreadStartException)
+        {
+            Debug.WriteLine(
+                $"the USB/IP audio event thread did not start, {_events.Count} change(s) waiting: " +
+                $"{ex.GetType().FullName}: {ex.Message}");
+            return false;
+        }
+        _eventThread = events;
+        return true;
+    }
+
+    /// <summary>The event thread: raises each queued event in order, and
+    /// ends at Dispose once the queue is empty. An exception a handler
+    /// throws is dropped, so it ends neither this thread nor the device's
+    /// connection.</summary>
+    private void EventLoop()
+    {
+        try
+        {
+            while (true)
+            {
+                AudioEvent e;
+                bool any;
+                lock (_lock)
+                {
+                    // Each change the host made before Dispose is raised,
+                    // then the thread ends.
+                    any = _events.Count > 0;
+                    e = any ? _events[0] : default;
+                    if (any) _events.RemoveAt(0);
+                    else if (_stop) return;
+                }
+                if (!any)
+                {
+                    _eventWake.WaitOne(250);
+                    continue;
+                }
+                try
+                {
+                    if (e.IsControl)
+                        AudioEventRaise.Each(ControlChanged, e.A, e.B, e.C, e.Value, nameof(ControlChanged));
+                    else if (!_altRaised.TryGetValue(e.A, out var last) || last != e.B)
+                    {
+                        _altRaised[e.A] = e.B;
+                        AudioEventRaise.Each(AltSettingChanged, e.A, e.B, nameof(AltSettingChanged));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"a USB/IP audio handler threw {ex.GetType().FullName}: {ex.Message}");
+                }
+            }
+        }
+        finally
+        {
+            lock (_lock) _eventWakeClosed = true;
+            _eventWake.Dispose();
         }
     }
 
     /// <summary>Close each inferred stream whose traffic stopped. Runs on
     /// the pump thread, which must not wait on a consumer's handler, so
-    /// the closes are raised from the thread pool.</summary>
+    /// the closes go to the event thread.</summary>
     private void CloseIdleInferredStreams(long now)
     {
         _inferClosing.Clear();
@@ -308,12 +437,8 @@ internal sealed class UsbAudioEngine : IDisposable
             {
                 _inferredOpen.Remove(iface);
                 _altSetting[iface] = 0;
+                QueueAltLocked(iface, 0);
             }
-        }
-        foreach (var iface in _inferClosing)
-        {
-            byte closed = iface;
-            ThreadPool.QueueUserWorkItem(_ => RaiseAltChanged(closed));
         }
     }
 
@@ -428,8 +553,8 @@ internal sealed class UsbAudioEngine : IDisposable
         {
             if (!_controlCur.ContainsKey((unitId, selector, channel))) return false;
             _controlCur[(unitId, selector, channel)] = value;
+            QueueEventLocked(new AudioEvent(true, unitId, selector, channel, value));
         }
-        ControlChanged?.Invoke(unitId, selector, channel, value);
         return true;
     }
 
@@ -538,16 +663,48 @@ internal sealed class UsbAudioEngine : IDisposable
         {
             var payload = p.OutPayload;
             if (payload != null && payload.Length > 0)
-                OutFrames?.Invoke(payload);
+                AudioEventRaise.Each(OutFrames, payload, nameof(OutFrames));
             _complete(p, null, 0);
         }
     }
 
+    /// <summary>Stop the pump and the event thread. Changes queued before
+    /// Dispose are still raised, and a handler still running holds Dispose
+    /// up that long at most. A second call returns. Called from a handler
+    /// on either thread, it does not wait for that thread.</summary>
     public void Dispose()
     {
-        _stop = true;
-        _wake.Set();
-        try { _thread.Join(500); } catch { }
+        Thread? events;
+        lock (_lock)
+        {
+            if (_stop) return;
+            _stop = true;
+            _wake.Set();
+            // Changes queued while the event thread could not start get one
+            // more try here, so they are still raised.
+            if (!_eventWakeClosed && _eventThread == null && _events.Count > 0)
+                TryStartEventsLocked();
+            events = _eventThread;
+            if (!_eventWakeClosed)
+            {
+                if (events != null)
+                {
+                    _eventWake.Set();
+                }
+                else
+                {
+                    // No thread will ever wait on it or raise what is
+                    // queued. The queue starts no thread after _stop.
+                    _events.Clear();
+                    _eventWakeClosed = true;
+                    _eventWake.Dispose();
+                }
+            }
+        }
+        if (Thread.CurrentThread != _thread)
+            try { _thread.Join(500); } catch { }
+        if (events != null && Thread.CurrentThread != events)
+            try { events.Join(500); } catch { }
         if (_timer != IntPtr.Zero) CloseHandle(_timer);
         _wake.Dispose();
     }

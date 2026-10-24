@@ -28,7 +28,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 > 注意：GKMD 是 GKME 项目内长期演进后的驱动分支的独立化产物，**不是** HIDMaestro 1.5.1 的
 > 逐行精简单文件拷贝。本文档除特别标注「1.5.1 基线」的行外，均以**最新上游 v2.0.3** 为对比对象。
 > 由于 GKMD 停留在 1.5.1 派生 API 上，它同样缺少上游 1.6.0 至 2.0.3 中依赖 2.0 数据模型的改动；
-> GKMD 已同步的上游修复最新到 1.12.0。
+> 其中 USB/IP 运行时代码的修复已同步到 2.0.3。
 
 ## 与 HIDMaestro 2.0.3 的差异
 
@@ -86,6 +86,8 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 - **1.8.0 – 1.12.0**：身份 / 音频 / DualShock 4 修复（其中与 USB/IP 相关的**已同步**，见下文）、带 motion 的 Switch 2 Pro（1.11.0）、103 个键盘/鼠标 profile 与键盘鼠标 API（1.12.0），以及其它 catalog 与 persona 工作。
 - **2.0.0**：devices-as-data 的 report 字段、feature 应答、协议与 report 程序；`ProgramForm` 编译器 / 解释器；`deviceModelFrom` 模型；带 JSON 路径的严格 profile 校验；`HMPort`；identity key 与 lease；`HMBuildInfo`；NativeAOT 支持；ARM64 驱动/传输载荷；Wii U GameCube 适配器；PS Move 与 DualShock 3 的数据化形态；337 个 profile 目录。
 - **2.0.1 – 2.0.3**：不运行 usbip-win2 安装器而直接安装其 host controller 文件、`HMUninstall` / `HIDMaestroUninstall.exe`、移除 usbip-win2 host controller 与 root-hub filter，以及 Valve persona 修正。
+
+2.0.0 的 **USB/IP 运行时**修复**已同步**（仅接受 host controller 导入、握手超时与并发上限、死服务清扫、按 location 拆除、释放与音频事件加固；见第 7 节同步清单）。GKMD 未采用的是 2.0 数据模型、identity / lease 系统、2.0.1–2.0.3 的安装/卸载器，以及仅涉及性能的零分配改动。
 
 GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的静态注册表和 1.x 派生的控制器 API。
 
@@ -148,17 +150,18 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | `SharedMemoryIO.cs` | **删除 PID 状态整套**：PID_STATE 尺寸/偏移常量、`EnsurePidStateMapping`、`WritePidPool/BlockLoad/State`、`ReadPidBlockLoad`、`WritePidReportIds` 及相关句柄与释放逻辑 |
 | `UsbConfigurationSpec.cs` | 新增 `InputReportSize`、`VendorRequests`（含 `VendorControlRequest` 类型）、`Gip`、`ResolutionMultiplier`；注释改为 USB/IP persona 描述符集 |
 | `UsbDescriptorSet.cs` | `ReportDescriptor` 可空、新增 `HasHidInterface` / `InputEndpoint`；解析厂商 0x21 class descriptor；HID 接口改为可选；新增 `GetClassDescriptor`；iSerial 返回真实序列号；按控制器索引变化已捕获的 serial，并为无 serial 的 profile 提供稳定的合成 serial（上游 1.8.0 身份修复） |
-| `UsbipBackend.cs` | `Attach` 传 `UsbipReceiveMode.LowLatency`；`UsbipBackendHandle.Dispose` 增加 `WaitForPortDetached`（含一次重试），避免快速模式切换复用未清理端口 |
+| `UsbipBackend.cs` | `Attach` 传 `UsbipReceiveMode.LowLatency`；死服务清扫只拆除没有监听者的 import、只取消死 location 的 attempts；attach 失败会清理抢先进入的 import；`UsbipBackendHandle.Dispose` 按 location 拆除、等待其离开列表（含一次重试）并取消其 attempts |
 | `UsbipDriverInstaller.cs` | 固定 **0.9.8.1** 并校验该 release 的 SHA-256；`EnsureInstalled` 校验 ABI 并抛「需安装/需重启」异常；新增 `Install(interactive)`、Inno 退出码解析（0/3010）、`NeedsRebootThisBoot` 标记、`WaitForCurrentAbi`、`IsCurrentAbi`；调用 `VhciClient.IsCurrentAbi()`，使 0.9.8.1 / 0.9.8.0 / 0.9.7.x 都能被识别；`StampOwnerHardwareId` 枚举 `ROOT\USB\0000..000F` 并逐个打标 |
-| `VhciClient.cs` | 支持**三套 vHCI 布局**并探测已安装驱动的那一套：0.9.8.1（`plugin_hardware` 1124、stop 1108、行 1132，`port` 后新增 `location_hash`）、0.9.8.0（1120 / 1104 / 1128）、0.9.7.x（1100 / 1104 / 1108，无 `wsk_events`）；`Attach` 新增 `UsbipReceiveMode` 参数；`Detach` 将 ≤0 归一化为 `PORT_ALL(-1)`；新增 `WaitForPortDetached`、`IsCurrentAbi`、`InstalledLayout`、`UsbipReceiveMode` |
-| `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；注释跟随 0.9.8.x 线上协议 |
-| `UsbipEmulatedDevice.cs` | 新增 GIP / Switch 两条 input pump 分支、厂商类不透明上报、`vendorRequests`、Resolution Multiplier、DS4 0x20/0x81、DualSense 测试指令；仅应答 `InputEndpoint`；`Audio` 可空；重连/重置清理；GIP 错误日志；同步上游 1.10.0 的 DualShock 4 `0x01` 偏移与 `0x05` 校准；把接口 / alt setting 传给音频引擎 |
+| `VhciClient.cs` | 支持**三套 vHCI 布局**并探测已安装驱动的那一套：0.9.8.1（`plugin_hardware` 1124、stop 1108、行 1132，`port` 后新增 `location_hash`）、0.9.8.0（1120 / 1104 / 1128）、0.9.7.x（1100 / 1104 / 1108，无 `wsk_events`）；`Attach` 新增 `UsbipReceiveMode` 参数；`Detach` 将 ≤0 归一化为 `PORT_ALL(-1)`；新增 `WaitForPortDetached`、`DetachLocation`、`FindLocation`、`SamePort`、`WaitForLocationDetached`、批量 `StopAttachAttempts`、`IsCurrentAbi`、`InstalledLayout`、`UsbipReceiveMode` |
+| `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；新增仅接受 host controller 的导入、握手超时与并发上限、第二端口段与 OS 分配回退、未知 bus id 的 re-attach 取消、应答失败时的 claim 清理，以及设备 Dispose 后结束 import |
+| `Usbip/TcpConnectionOwner.cs` | 新增：通过 `GetExtendedTcpTable` 把已接受的 loopback 连接映射到所属 PID，只有内核 WSK 连接（System，PID 4）可以导入 |
+| `UsbipEmulatedDevice.cs` | 新增 GIP / Switch 两条 input pump 分支、厂商类不透明上报、`vendorRequests`、Resolution Multiplier、DS4 0x20/0x81、DualSense 测试指令；仅应答 `InputEndpoint`；`Audio` 可空；重连/重置清理；GIP 错误日志；同步上游 1.10.0 的 DualShock 4 `0x01` 偏移与 `0x05` 校准；把接口 / alt setting 传给音频引擎；新增 `IsDisposed` / claim 检查、会唤醒输入泵的幂等 `Dispose`，以及描述符未声明 input report ID 时的 STALL |
 | `Usbip/GipResponder.cs` | Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），重算 device / total / client-command 偏移后形成 230 字节 blob；Xbox One 的 `InputReportSize` 从 18 修正为 14。此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
-| `Usbip/UsbAudioEngine.cs` | 版本语义跟随 0.9.8.x；`DeviceOrchestrator.LogDiag` → `Debug.WriteLine`；旧 filter 不转发 `SET_INTERFACE` 时，根据等时传输推断流的开启/关闭（上游 1.10.0 修复）；针对 0.9.8.1 filter 使用 bmRequestType 0x80 |
+| `Usbip/UsbAudioEngine.cs` | 版本语义跟随 0.9.8.x；`DeviceOrchestrator.LogDiag` → `Debug.WriteLine`；旧 filter 不转发 `SET_INTERFACE` 时，根据等时传输推断流的开启/关闭（上游 1.10.0 修复）；针对 0.9.8.1 filter 使用 bmRequestType 0x80；control 与 stream 变化在专用 event thread 上按主机顺序触发，handler 异常会被丢弃 |
 | `GKProfile.cs` | 删除 `Backend` / `RequiresUsbipBackend`；`Connection` 改用 `IsNullOrEmpty` 判空；文档由「profile JSON」改为「catalog / 内建」 |
 | `GKLayoutLoader.cs` | 增加 `IL3050` / `IL2026` 抑制与 `System.Diagnostics.CodeAnalysis`，适配 AOT / 裁剪 |
 | `OemNameOverrideStore.cs` | 增加 `CA1416`（仅 Windows）平台兼容抑制 |
-| `GKUsbAudio.cs` | 注释更新；`device.Audio` 改为可空后加 `!` |
+| `GKUsbAudio.cs` | 注释更新；`device.Audio` 改为可空后加 `!`；公开音频事件按 handler 逐个触发，异常被丢弃而不是结束音频线程或连接 |
 | `VendorBlobCodec.cs`、`VendorBlobProgram.cs` | 同步上游 1.10.0 的 DualShock 4 修复：`uint16-le` 传感器时间戳、触摸包计数器、电量 `fullValue`、cable 位，以及按 8 位触发值判定 `LT_DIGITAL` / `RT_DIGITAL` |
 | `HidReportBuilder.cs`、`HidDescriptorBuilder.cs`、`GKOutputDecodedEventArgs.cs`、`GKOutputEncoder.cs`、`GKProfileBuilder.cs` | 仅措辞/微小空判断语法，无功能变化 |
 | `GKGamepadState.cs`、`GKLayout.cs`、`GKOemNameOverride.cs`、`GKOutputPacket.cs`、`TimeoutScale.cs`、`UsbipProtocol.cs` | 除命名空间外**无差异** |
@@ -171,9 +174,26 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 - **每控制器稳定 serial**（`46054b8`、`a396741`）：USB serial 按控制器索引变化；无捕获 serial 的 profile 生成稳定的合成 serial。Windows 以它作为 USB 实例 ID，而不再依赖 vhci 端口。
 - **DualShock 4 报文**（`fd86c1a`）：`0x01` 各字段落在 SDL/Linux 读取的偏移；传感器时间戳按 16/3 µs 递增；电量/充满/cable 与触摸字段符合真实手柄；`LT_DIGITAL` / `RT_DIGITAL` 按 8 位触发值判定；校准改为单位校准（8192/g、16/°/s），并提供 DS4 的 `0x05` 顺序。
 
+#### 已同步的上游 USB/IP 修复（1.12.0 → 2.0.3）
+
+以下 2.0.0 改动完全位于 USB/IP 传输与设备层，不依赖 2.0 数据模型，因此已移植：
+
+- **仅接受 host controller 导入**（`TcpConnectionOwner`）：只有连接客户端属于 System 进程（PID 4，内核 WSK 连接的表现）时才接受 `OP_REQ_IMPORT`。本机其它程序不能再从另一个进程导入 persona。
+- **握手限制**：连接必须在 5 秒内完成导入握手；同时最多 16 个握手，超出且不是 host controller 打开的连接会在不创建线程的情况下关闭。
+- **端口耗尽**：`18509..18524` 用完后依次尝试 `28509..28524`，再退到 OS 分配的 loopback 端口，而不是让所有复合 persona 失败。
+- **死服务清扫**：只拆除端口上没有监听者（或本进程自己的端口上未导出的 bus id）的 import，并且只取消这些死 location 的 re-attach attempts。其它正在运行程序的 server 和 import 不会被触碰。
+- **按 location 拆除**：`DetachLocation` / `FindLocation` / `WaitForLocationDetached` 按 `(host, server 端口, bus id)` 拆除与等待，而不是按可能已被其它设备复用的 vhci 端口。
+- **注册闸门**：清扫期间新的注册会等待，避免新设备 attach 到清扫即将拆除的位置。
+- **attach / import 清理**：attach 失败会拆除抢先进入的 import 并取消其 attempt；server 在发送 import 应答前就持有 device claim，因此应答发送失败也不会让 bus id 永久停在 `ST_DEV_BUSY`。
+- **释放**：被 Dispose 的设备会结束其打开的 import；handle 按 location 拆除并取消该 location 的 attempts；`Dispose` 会唤醒输入泵，而不再等满 500 ms 的帧等待；第二次 `Dispose` 直接返回。
+- **音频事件隔离**：control 与 stream 变化在专用 audio event thread 上按主机顺序触发，慢 handler 不会阻塞连接 reader 或音频泵；handler 抛出的异常会被丢弃，而不是结束连接或进程。
+- **GET_REPORT(Input)**：HID 描述符未声明的 report ID 返回 STALL，而不是最后一份报文。
+
+以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：零分配 control/frame 路径（仅性能）、owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略）、ARM64 载荷，以及 2.0 数据模型。
+
 #### 1.12.0 之后未同步的上游工作（1.12.0 → 2.0.3）
 
-- **2.0.0** 把设备层换成 JSON 数据 + 编译程序，新增带 JSON 路径的严格 profile 校验、`HMPort`、identity key / lease、NativeAOT、ARM64 载荷、Wii U GameCube 适配器与 337 个 profile。这些是架构性改动，无法直接移植进 GKMD 的静态 C# 注册表。
+- **2.0.0** 把设备层换成 JSON 数据 + 编译程序，新增带 JSON 路径的严格 profile 校验、`HMPort`、identity key / lease、NativeAOT、ARM64 载荷、Wii U GameCube 适配器与 337 个 profile。这些是架构性改动，无法直接移植进 GKMD 的静态 C# 注册表；其中 USB/IP 运行时的修复已列在上方并已同步。
 - **2.0.1 – 2.0.3** 直接安装 usbip-win2 host controller 文件，新增 `HMUninstall` 与 usbip-win2 host controller / root-hub filter 移除，并修正 Valve persona。GKMD 有意保留官方 usbip-win2 安装器与仅探测的安装策略，也没有 Valve persona 需要修正。
 - 1.6.0 – 1.12.0 之间的 VR、Valve persona、Switch 2 Pro、键盘/鼠标 profile、PS Move、DualShock 3 压力等属于新 persona 或新 API，而非可移植修复；见第 4 节。
 
@@ -191,7 +211,7 @@ GKMD/
 ├── StaticProfileRegistry.cs    # 内建 profile（代码构造）
 ├── TimeoutScale.cs / GKLayout.cs / GKLayoutLoader.cs / ...
 ├── Usbip/                      # USB/IP 后端
-│   ├── UsbipBackend.cs / UsbipServer.cs / VhciClient.cs
+│   ├── UsbipBackend.cs / UsbipServer.cs / VhciClient.cs / TcpConnectionOwner.cs
 │   ├── UsbipEmulatedDevice.cs  # 设备端行为（HID / GIP / Switch / vendor）
 │   ├── UsbDescriptorSet.cs / UsbConfigurationSpec.cs
 │   ├── UsbipDriverInstaller.cs # 部署/升级 usbip-win2

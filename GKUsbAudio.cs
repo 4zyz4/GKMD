@@ -19,9 +19,13 @@ namespace GKMD;
 /// streams it to whatever is recording, silence when the buffer runs
 /// dry).</para>
 ///
-/// <para>All events fire on the backend's pacing thread. Handlers must
-/// be quick and thread-safe, same contract as
-/// <see cref="GKController.OutputReceived"/>.</para></summary>
+/// <para>Audio frames fire on the backend's pacing thread. Control and
+/// streaming changes fire on the backend's audio event thread, in the
+/// order the host made them, so a handler that blocks delays neither the
+/// connection's reader nor the audio pump. Handlers must be quick and
+/// thread-safe, same contract as <see cref="GKController.OutputReceived"/>.
+/// An exception a handler throws is dropped rather than ending the device's
+/// connection or the audio thread.</para></summary>
 public sealed class GKUsbAudio
 {
     /// <summary>The render direction: speaker plus haptic channels.</summary>
@@ -67,16 +71,14 @@ public sealed class GKUsbAudio
         };
         device.Audio.ControlChanged += (unit, selector, channel, raw) =>
         {
-            var handler = ControlChanged;
-            if (handler == null) return;
-            handler(this, new GKAudioControlChangedEventArgs
+            AudioEventRaise.Each(ControlChanged, this, new GKAudioControlChangedEventArgs
             {
                 Function = _unitFunctions.TryGetValue(unit, out var fn) ? fn : $"unit{unit}",
                 IsMute = selector == 1,
                 MuteValue = selector == 1 && raw != 0,
                 RawValue = raw,
                 VolumeDb = selector == 2 ? raw / 256.0 : 0.0,
-            });
+            }, nameof(ControlChanged));
         };
     }
 }
@@ -119,13 +121,14 @@ public sealed class GKAudioOutput
         _ = interfaceNumber;
     }
 
-    internal void RaiseFrames(ReadOnlyMemory<byte> pcm) => FramesReceived?.Invoke(this, pcm);
+    internal void RaiseFrames(ReadOnlyMemory<byte> pcm) =>
+        AudioEventRaise.Each(FramesReceived, this, pcm, nameof(FramesReceived));
 
     internal void SetStreaming(bool streaming)
     {
         if (IsStreaming == streaming) return;
         IsStreaming = streaming;
-        StreamingChanged?.Invoke(this, streaming);
+        AudioEventRaise.Each(StreamingChanged, this, streaming, nameof(StreamingChanged));
     }
 }
 
@@ -168,7 +171,7 @@ public sealed class GKMicrophoneInput
     {
         if (IsStreaming == streaming) return;
         IsStreaming = streaming;
-        StreamingChanged?.Invoke(this, streaming);
+        AudioEventRaise.Each(StreamingChanged, this, streaming, nameof(StreamingChanged));
     }
 }
 
