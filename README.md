@@ -9,7 +9,8 @@ GKMD is a standalone Windows virtual USB game controller engine (class library) 
 GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMaestro) 1.5.1** (tag `v1.5.1`, MIT License). It was extracted from HIDMaestro's `sdk/HIDMaestro.Core` and extensively trimmed, rewritten, and extended toward a "pure USB/IP backend + fixed built-in profiles" design.
 
 - Upstream project: https://github.com/hifihedgehog/HIDMaestro
-- Upstream version: `v1.5.1`
+- Origin version: `v1.5.1`
+- **Latest upstream compared: `v2.0.3`** (2026-10-22), the current release. It has moved device behavior into JSON profiles with compiled programs, and ships identity keys, automatic transport installation, uninstall, VR and ARM64 payloads; it also changed the public API, so 1.x programs must migrate to 2.0.
 - Upstream license: MIT License (see `LICENSE`; GKMD retains the original copyright notice)
 - Namespaces: `HIDMaestro` / `HIDMaestro.Internal` / `HIDMaestro.Internal.Usbip`
   → `GKMD` / `GKMD.Internal` / `GKMD.Internal.Usbip`
@@ -18,45 +19,92 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 - Runtime identifiers: `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*`
   → `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*`
 
-> Note: GKMD is the standalone product of a driver branch that evolved over the long term within the GKME project. It is **not** a line-by-line simplified single-file copy of HIDMaestro 1.5.1. The "differences" in the table below constitute all known changes relative to 1.5.1.
+> Note: GKMD is the standalone product of a driver branch that evolved over the long term within the GKME project. It is **not** a line-by-line simplified single-file copy of HIDMaestro 1.5.1. This README compares GKMD against the **latest upstream, v2.0.3**, unless a row explicitly says "1.5.1 base". Because GKMD stays on the 1.5.1-derived API, it also lacks the upstream work from 1.6.0 through 2.0.3 that builds on the 2.0 data model; the newest upstream fixes GKMD has synced are from 1.12.0.
 
-## Differences summary
+## Differences from HIDMaestro 2.0.3
 
 ### 1. Transport / driver architecture
 
-| Dimension | HIDMaestro 1.5.1 | GKMD |
+| Dimension | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
-| Controller creation path | Branches on `RequiresUsbipBackend`: normal profiles use UMDF2 + PnP, composite personas use USB/IP | **No branching; everything goes through USB/IP** (`CreateController` / `CreateControllerAt` both call `CreateUsbipController`) |
-| Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP | Pure USB/IP: usbip-win2 virtual host controller + vHCI, **no kernel driver, no INF, no device node** |
-| Device node | Creates a root-enumerated / SWD PnP devnode and writes friendly name / ControllerIndex | No PnP devnode; device strings come directly from USB descriptors |
-| Transport installation | `DriverBuilder.FullDeploy()`: self-signed cert → sign → inf2cat → pnputil | `UsbipDriverInstaller` deploys / upgrades usbip-win2 |
-| usbip-win2 version | 0.9.7.7 | **0.9.8.1** (IOCTL ABI and structs updated in sync) |
-| USB/IP receive mode | Zero-copy (zero-copy MDL) only | Adds `UsbipReceiveMode.LowLatency` (default) / `ZeroCopy` |
-| Installation policy | Silently auto-installs on first creation | **Probe only**; throws `UsbipInstallRequiredException` / `UsbipRebootRequiredException` when missing/outdated, leaving installation to the host app |
-| Audio engine | `Audio` is always non-null | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
-| Controller index release | Removes the device first, then releases the index | Tears down the USB/IP device first, then releases the index (avoids port reuse races during fast switching) |
+| Controller creation path | Branches on `RequiresUsbipBackend`: ordinary profiles use UMDF2 + PnP, composite personas use USB/IP | **No branching; everything goes through USB/IP** (`CreateController` / `CreateControllerAt` both call `CreateUsbipController`) |
+| Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP for ordinary profiles; usbip-win2's host controller for composite personas. No kernel-mode driver | Pure USB/IP: usbip-win2 virtual host controller + vHCI, **no UMDF2 driver, no INF, no PnP device node** |
+| Device node | UMDF2 path registers a root-enumerated / SWD PnP devnode and writes friendly name / ControllerIndex; composite path is a vhci USB device | No PnP devnode; device strings come directly from USB descriptors |
+| Transport installation | Since 2.0.1 the SDK embeds the unmodified `usbip2_ude.inf` / `.sys` / `.cat` for x64 and ARM64 and registers the host controller devnode itself (`InstallHostController`); it never runs usbip-win2's installer and never installs its root-hub filter, and it records what it installed | `UsbipDriverInstaller` embeds and runs the official x64 `USBip-0.9.8.1-x64.exe` (Inno) installer |
+| usbip-win2 version | 0.9.8.1, x64 + ARM64 payloads | 0.9.8.1 installer payload (x64); `VhciClient` speaks the **0.9.8.1 / 0.9.8.0 / 0.9.7.x** request layouts and probes the installed driver for the one it has |
+| USB/IP receive mode | Always the IRP receive path (`wsk_events` left false); no selectable mode | Adds `UsbipReceiveMode.LowLatency` (default) / `ZeroCopy` on 0.9.8.x; 0.9.7.x always uses the MDL path |
+| Installation policy | Silently installs the bundled transport on the first composite create; `InstallDriver()` does the same for UMDF2 | **Probe only**; throws `UsbipInstallRequiredException` / `UsbipRebootRequiredException` when missing/outdated, leaving installation to the host app |
+| Audio engine | Composite personas carry USB Audio over USB/IP; the SDK installs the transport for them | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
+| Controller index / identity release | Lease + reservation system, identity keys, multi-program coexistence (a keyless 1.12.0 program lands at transport index 64+) | Tears down the USB/IP device first, then releases the index (avoids port reuse races during fast switching) |
+| Uninstall | `HMUninstall` / `HIDMaestroUninstall.exe` removes controllers, driver packages, certificate, registry keys and files; 2.0.3 can also remove usbip-win2 and its root-hub filter | No uninstall API or tool; the host app handles teardown (`UsbipBackend.DetachAllOwned`) |
+| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | AnyCPU managed DLL; the embedded usbip-win2 payload is x64-only |
 | Diagnostic log | `DeviceOrchestrator.LogDiag` | Replaced with `Debug.WriteLine` |
 
-### 2. New features
+### 2. Profiles and device behavior
 
-| Feature | Related files | Description |
+| Dimension | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
-| Xbox One GIP protocol | `Usbip/GipProtocol.cs`, `Usbip/GipResponder.cs`, `Usbip/GipLog.cs`, `Usbip/UsbipEmulatedDevice.cs` | Vendor class `045E:02EA` implements Microsoft Gaming Input Protocol: HELLO/announce/identify/status handshake, 14-byte `gip_gamepad_pkt_input` input, guide virtual key, host command (power/LED/rumble/identify) decoding |
-| Switch Pro / Joy-Con responder | `Usbip/UsbipEmulatedDevice.cs`, `StaticProfileRegistry.cs` | `057E:2009/2006/2007`: 0x80 USB init, 0x01 subcommands, 0x30/0x21 frames, fake SPI mirror (IMU/stick calibration, colors, serial number, device type), 15 ms streaming, IMU toggle, rumble enable |
-| Vendor-class (non-HID) device channel | `UsbDescriptorSet.cs`, `UsbipEmulatedDevice.cs`, `UsbConfigurationSpec.cs` | Passes opaque input reports through verbatim; the `vendorRequests` table answers EP0 vendor requests (e.g. Xbox 360 `0xC1/0x01/0x0100` capability report); only answers `InputEndpoint` and STALLs the remaining INT-IN endpoints (avoids xusb22 creating a phantom audio device) |
-| Xbox 360 persona | `StaticProfileRegistry.BuildXbox360()` | 20-byte native input report + `VendorRequests` capability report, no HID descriptor path |
-| DualShock 4 authentication / serial | `Usbip/UsbipEmulatedDevice.cs` | Adds `Ds4FeatureReport20` (JDM-050 serial number) and `Ds4FeatureReport81` (`0x03030301` challenge response); recognizes the `SET_FEATURE 0x80` subcommand |
-| DualSense test commands | `Usbip/SonyTestCommandHandler.cs` | torch/telemetry, Type2 tracability, BT MAC/patch, battery voltage and other device_id/action_id families, with multi-page/single-page responses and header injection |
-| DualSense firmware info update | `Usbip/UsbipEmulatedDevice.cs` | Firmware string `202510:10:32` → `202510:38`, version/series field adjustments, adds `GetDs5FirmwareInfo()` |
-| High-resolution wheel | `UsbConfigurationSpec.ResolutionMultiplier` | Supports the Resolution Multiplier for `GET/SET_REPORT(Feature, 0)`, defaulting to high resolution during enumeration |
-| Device serial number string | `ControllerProfile.SerialNumberString`, `UsbDescriptorSet.cs` | iSerial returns the real serial number (previously always returned null) |
-| Install/reboot exception types | `Usbip/UsbipInstallRequiredException.cs`, `Usbip/UsbipRebootRequiredException.cs` | Lets the host UI turn "needs install / needs reboot" into a prompt rather than a failure |
-| Static profile registry | `StaticProfileRegistry.cs` | Builds built-in profiles in code, replacing the upstream JSON catalog/embedded resources |
-| Keyboard / mouse HID persona | `StaticProfileRegistry.cs` | Built-in keyboard / mouse profiles (used by GKME for virtual keyboard/mouse) |
+| Profile source | 337 built-in profiles (103 keyboards and mice) linked from `profiles/**/*.json`; custom and extracted profiles load at runtime; strict source-generated JSON | 10 personas constructed in code by `StaticProfileRegistry.cs`; **no JSON catalog, no profile extraction** |
+| Profile validation | Strict schema; a refused file is reported in `HMContext.ProfileLoadIssues` with its JSON path; code-built profiles throw `HMProfileException` with `ProfileId` / `JsonPath` | C# compile-time construction; no schema or JSON-path diagnostics |
+| Device behavior | Devices are data: report fields, feature answers, protocols and report programs are profile keys, with `deviceModelFrom` supplying defaults; catalog programs compile to code, other profiles run the same programs on an interpreter | Fixed C# builders (`HidDescriptorBuilder`, `HidReportBuilder`, `VendorBlobCodec`) and hand-written responders |
+| Multi-controller devices | `HMPort` / `HMPortSet` for adapters, multitaps and receivers that carry several controllers in one report | None |
+| Device identity | `identityKey` + leases keep parent / child / interface path / DirectInput GUID / SDL path / container id / serial across dispose, restart, reboot and driver upgrade | A serial varies by controller index; profiles without one get a stable synthetic serial |
+| Persona coverage | 337 profiles: Xbox 360 family, Xbox One / Series (UMDF2), DualShock 3 / 4, DualSense, Switch Pro / Joy-Con / Switch 2 Pro, Valve Steam Controller / Steam Deck, VR controllers, wheels, keyboards and mice, Wii U GameCube adapter, PS Move, etc. | 10 personas: Xbox 360, Xbox One, Xbox Series X\|S, DualShock 4 v2, DualSense, Switch Pro, Joy-Con L/R, keyboard, mouse |
+| Xbox One / Series transport | Presented through UMDF2 with the Windows `xinputhid` view; the USB wire protocol is not GIP | Implemented as a **GIP vendor-class device** over USB/IP (`045E:02EA` / `045E:0B12`), including the `[MS-GIPUSB]` envelope |
+| Switch | Switch Pro / Joy-Con / Switch 2 Pro over Bluetooth and USB descriptors, protocol data in the profile | Switch Pro / Joy-Con over USB with a code-side responder |
+| Keyboards / mice | `SubmitKeyboard` / `SubmitMouse` / `SubmitConsumer`, LED state, absolute mice, 103 real-device profiles | Two simple built-in personas used by GKME |
+| VR | `HMVR` / `HMVRController` and an OpenVR driver package | None |
+| Sony device answers | Served from profile data (firmware info, pairing info, calibration), with Bluetooth CRC-32 | Code-side DS4 authentication / serial reports and DualSense test-command handler |
 
-### 3. Removed components / features
+### 3. GKMD-specific capabilities
 
-| File / feature (present in 1.5.1) | Original responsibility |
+| Capability | Related files | Description |
+| --- | --- | --- |
+| GIP over USB/IP | `Usbip/GipProtocol.cs`, `Usbip/GipResponder.cs`, `Usbip/GipLog.cs` | Xbox One (`045E:02EA`) and Xbox Series X\|S (`045E:0B12`) are vendor-class USB devices answering the full GIP handshake (HELLO / announce / identify / status), 14-byte `gip_gamepad_pkt_input`, guide virtual key, and host commands (power / LED / rumble / identify). Xbox One starts from the real 214-byte gamepad metadata and appends the PC security opt-out as a fourth interface (keeping `INavigationController`), producing a 230-byte blob; the previous 182-byte sample metadata made `xboxgip` bugcheck on create |
+| Selectable USB/IP receive mode | `Usbip/VhciClient.cs`, `Usbip/UsbipBackend.cs` | `UsbipReceiveMode.LowLatency` (default, `wsk_events`) / `ZeroCopy` (MDL) on 0.9.8.x |
+| Probe-only installation | `Usbip/UsbipInstallRequiredException.cs`, `Usbip/UsbipRebootRequiredException.cs` | The library never installs a driver behind the host's back; the host UI turns "needs install / needs reboot" into a prompt |
+| Code-defined profile registry | `StaticProfileRegistry.cs` | Built-in personas are ordinary C# and carry no JSON or reflection dependency |
+| Code-side Sony handlers | `Usbip/SonyTestCommandHandler.cs`, `Usbip/UsbipEmulatedDevice.cs` | DualSense test commands (torch/telemetry, Type2 tracability, BT MAC/patch, battery voltage) and DualShock 4 `0x20` / `0x81` feature reports (`0x03030301` challenge response) |
+| High-resolution wheel | `UsbConfigurationSpec.ResolutionMultiplier` | Answers `GET/SET_REPORT(Feature, 0)` and enumerates at high resolution |
+| AOT-friendly library | `GKMD.csproj`, `GKLayoutLoader.cs` | `IsAotCompatible=true`; only the reflection-based layout JSON path is locally suppressed |
+| GKME integration | `AssemblyInfo.cs` | Linked by [GKME](../GKME-Windows) through `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
+
+### 4. Upstream work GKMD has not adopted (1.6.0 → 2.0.3)
+
+Only fixes that apply to the pure USB/IP design and that existed through 1.12.0 were synced. The following upstream work is not present:
+
+- **1.6.0 – 1.7.3**: virtual VR controllers and the OpenVR driver, Valve personas (Steam Controller, Steam Deck), the Steam Controller 2 raw report, WGI gamepad presentation for the Xbox 360 family, legacy `GetControllerState`, native binary stamping.
+- **1.8.0 – 1.12.0**: the identity / audio / DualShock 4 fixes (the USB/IP-relevant ones **are** synced; see below), the Switch 2 Pro with motion (1.11.0), 103 keyboard/mouse profiles and the keyboard/mouse API (1.12.0), and other catalog and persona work.
+- **2.0.0**: devices-as-data report fields, feature answers, protocols and report programs; the `ProgramForm` compiler / interpreter; `deviceModelFrom` models; strict profile validation with JSON paths; `HMPort`; identity keys and leases; `HMBuildInfo`; NativeAOT support; ARM64 driver/transport payloads; the Wii U GameCube adapter; the PS Move and DualShock 3 data forms; the 337-profile catalog.
+- **2.0.1 – 2.0.3**: direct installation of usbip-win2's host controller files without running its installer, `HMUninstall` / `HIDMaestroUninstall.exe`, removal of the usbip-win2 host controller and root-hub filter, and the Valve persona corrections.
+
+GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the code-defined static registry and the 1.x-derived controller API.
+
+### 5. Build / project differences
+
+| Dimension | HIDMaestro 2.0.3 | GKMD |
+| --- | --- | --- |
+| Output | Class library `HIDMaestro.Core.dll` | Class library **`GKMD.dll`** |
+| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` |
+| Platform | AnyCPU | AnyCPU |
+| Namespaces | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
+| Directory structure | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | Flattened to the root + the `Usbip/` subdirectory |
+| Driver resources | Embeds UMDF2 driver + XUSB companion + SWD helper + INFs + signing/catalog tools + OpenVR driver + `usbip2_ude` files, for x64 and ARM64 | **Embeds no kernel or UMDF2 driver and no signing/catalog tools**; embeds only `Resources/USBip-0.9.8.1-x64.exe` and `THIRD-PARTY-NOTICES.txt` |
+| usbip-win2 acquisition | Build-time `prepare_usbip.ps1` unpacks the pinned 0.9.8.1 installers into per-architecture host-controller files | Embeds 0.9.8.1 directly, no download target; SHA-256 verified at runtime |
+| Profile source | 348 JSON files under `profiles/`; the 2.0.3 catalog exposes 337 built-in profiles, compiled into the assembly with source-generated JSON | No JSON resources, constructed in code by `StaticProfileRegistry.cs` |
+| Resource logical names | `HIDMaestro.*` | `GKMD.Resources.*` |
+| Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
+| Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
+| Version | `2.0.3` | `4.6.1.0` (follows GKME) |
+| AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally; the host publishes with `PublishAot` |
+| ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Managed AnyCPU assembly; bundled usbip-win2 payload is x64-only |
+| Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
+
+### 6. Removed from the 1.5.1 base (appendix)
+
+These components exist in the 1.5.1 base. Upstream 2.0.3 still carries most of them (several have grown since; `SwitchProPacker` has been replaced by profile state blocks); GKMD carries none of them.
+
+| File / feature (present upstream) | Original responsibility |
 | --- | --- |
 | `HMDeviceExtractor.cs` | Extracts a full profile from a connected physical HID device (enumeration + descriptor reconstruction) |
 | `HMHidDeviceInfo.cs` | Lightweight HID device info DTO for `ListDevices()` |
@@ -79,7 +127,9 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Feature: UMDF2 lifecycle | `InstallDriver`'s ghost sweep / `FullDeploy`, `_batchDisposing`, `RemoveOrphanHidChildrenBatch`, background warm-up tasks |
 | `HIDMaestro.Core.csproj` | Upstream SDK project file, superseded by `GKMD.csproj` |
 
-### 4. Modified files (functional differences)
+### 7. File-level changes relative to the 1.5.1 base (appendix)
+
+These are the changes GKMD made to the 1.5.1 files. Upstream 2.0.3 has since rewritten many of them, so this table documents GKMD's derivation, not the current 2.0.3 implementation.
 
 | File | Main changes |
 | --- | --- |
@@ -90,20 +140,21 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | `UsbConfigurationSpec.cs` | Adds `InputReportSize`, `VendorRequests` (including the `VendorControlRequest` type), `Gip`, `ResolutionMultiplier`; comments changed to describe a USB/IP persona descriptor set |
 | `UsbDescriptorSet.cs` | `ReportDescriptor` is nullable, adds `HasHidInterface` / `InputEndpoint`; parses the vendor 0x21 class descriptor; the HID interface becomes optional; adds `GetClassDescriptor`; iSerial returns the real serial number; varies a captured serial per controller index and serves a stable synthetic serial for profiles that carry none (upstream 1.8.0 identity fix) |
 | `UsbipBackend.cs` | `Attach` passes `UsbipReceiveMode.LowLatency`; `UsbipBackendHandle.Dispose` adds `WaitForPortDetached` (with one retry) to avoid reusing an uncleaned port during fast mode switching |
-| `UsbipDriverInstaller.cs` | Bumps version/SHA to 0.9.8.0; `EnsureInstalled` now validates the ABI and throws "needs install / needs reboot" exceptions; adds `Install(interactive)`, Inno exit code parsing (0/3010), `NeedsRebootThisBoot` flag, `WaitForCurrentAbi`, `IsCurrentAbi`; `StampOwnerHardwareId` now enumerates `ROOT\USB\0000..000F` and stamps each |
+| `UsbipDriverInstaller.cs` | Pins **0.9.8.1** and verifies that release's SHA-256; `EnsureInstalled` validates the ABI and throws "needs install / needs reboot" exceptions; adds `Install(interactive)`, Inno exit code parsing (0/3010), `NeedsRebootThisBoot` flag, `WaitForCurrentAbi`, `IsCurrentAbi`; calls `VhciClient.IsCurrentAbi()` so 0.9.8.1 / 0.9.8.0 / 0.9.7.x are all recognized; `StampOwnerHardwareId` enumerates `ROOT\USB\0000..000F` and stamps each |
+| `VhciClient.cs` | Speaks **three vHCI layouts** and probes for the installed one: 0.9.8.1 (`plugin_hardware` 1124, stop 1108, row 1132, `location_hash` after `port`), 0.9.8.0 (1120 / 1104 / 1128) and 0.9.7.x (1100 / 1104 / 1108, no `wsk_events`); `Attach` adds a `UsbipReceiveMode` parameter; `Detach` normalizes ≤0 to `PORT_ALL(-1)`; adds `WaitForPortDetached`, `IsCurrentAbi`, `InstalledLayout`, `UsbipReceiveMode` |
+| `UsbipServer.cs` | `Unregister` adds identity validation (prevents an old device from mistakenly deleting a new one); comments follow the 0.9.8.x wire contract |
 | `UsbipEmulatedDevice.cs` | Adds the GIP / Switch input pump branches, vendor-class opaque reporting, `vendorRequests`, Resolution Multiplier, DS4 0x20/0x81, DualSense test commands; only answers `InputEndpoint`; `Audio` is nullable; reconnect/reset cleanup; GIP error logging; DualShock 4 0x01 offsets and 0x05 calibration from upstream 1.10.0; passes the interface / alternate setting to the audio engine |
-| `VhciClient.cs` | `plugin_hardware` struct expanded to 1120 bytes (adds serial / wsk_events), `imported_device` line 1128 bytes; `Attach` adds a `UsbipReceiveMode` parameter; `Detach` normalizes ≤0 to `PORT_ALL(-1)`; adds `WaitForPortDetached`, `IsCurrentAbi`, `UsbipReceiveMode` enum |
-| `UsbipServer.cs` | `Unregister` adds identity validation (prevents an old device from mistakenly deleting a new one); comment version bumped to 0.9.8.0 |
+| `Usbip/GipResponder.cs` | Xbox One now builds a 230-byte metadata blob from the real 214-byte gamepad metadata by appending the PC security opt-out as a fourth interface (keeping `INavigationController`) and recomputing the device / total / client-command offsets; Xbox One `InputReportSize` corrected from 18 to 14. The previous 182-byte sample metadata made `xboxgip` bugcheck on create |
+| `Usbip/UsbAudioEngine.cs` | Version semantics follow 0.9.8.x; `DeviceOrchestrator.LogDiag` → `Debug.WriteLine`; infers stream state from isochronous traffic when an older filter never forwards `SET_INTERFACE` (upstream 1.10.0 fix); uses bmRequestType 0x80 for the 0.9.8.1 filter |
 | `GKProfile.cs` | Removes `Backend` / `RequiresUsbipBackend`; `Connection` uses `IsNullOrEmpty` for null checks; docs changed from "profile JSON" to "catalog / built-in" |
 | `GKLayoutLoader.cs` | Adds `IL3050` / `IL2026` suppressions and `System.Diagnostics.CodeAnalysis`, adapting to AOT / trimming |
 | `OemNameOverrideStore.cs` | Adds the `CA1416` (Windows-only) platform compatibility suppression |
 | `GKUsbAudio.cs` | Comment update; adds `!` to `device.Audio` now that it is nullable |
-| `UsbAudioEngine.cs` | Version semantics bumped to 0.9.8.0; `DeviceOrchestrator.LogDiag` → `Debug.WriteLine`; infers stream state from isochronous traffic when an older filter never forwards `SET_INTERFACE` (upstream 1.10.0 fix) |
 | `VendorBlobCodec.cs`, `VendorBlobProgram.cs` | DualShock 4 fixes synced from upstream 1.10.0: `uint16-le` sensor timestamp, touch packet counter, battery `fullValue`, cable bit, and exact 8-bit trigger digital bits |
 | `HidReportBuilder.cs`, `HidDescriptorBuilder.cs`, `GKOutputDecodedEventArgs.cs`, `GKOutputEncoder.cs`, `GKProfileBuilder.cs` | Wording / minor null-check syntax only, no functional change |
 | `GKGamepadState.cs`, `GKLayout.cs`, `GKOemNameOverride.cs`, `GKOutputPacket.cs`, `TimeoutScale.cs`, `UsbipProtocol.cs` | **No differences** other than the namespace |
 
-#### Upstream fixes synced (HIDMaestro 1.5.1 → 1.12.0)
+#### Upstream fixes synced (1.5.1 → 1.12.0)
 
 Only fixes that apply to the pure USB/IP design were taken:
 
@@ -111,26 +162,11 @@ Only fixes that apply to the pure USB/IP design were taken:
 - **Stable per-controller serials** (`46054b8`, `a396741`): the USB serial varies by controller index, and profiles without a captured serial get a stable synthetic one. Windows keys the USB instance id on it instead of the vhci port.
 - **DualShock 4 reports** (`fd86c1a`): report `0x01` fields sit at SDL/Linux offsets, the sensor timestamp advances in 16/3 µs ticks, battery/full/cable and touch fields follow the real pad, `LT_DIGITAL` / `RT_DIGITAL` follow the 8-bit trigger value, and calibration is the identity (8192/g, 16/°/s) with the DS4 `0x05` ordering.
 
-Not synced because they do not apply or are new personas/features rather than fixes: the UMDF2 driver, `DeviceManager`, XUSB companion, VR / Valve / Switch 2 / keyboard-mouse features, and ARM64 packaging.
+#### Upstream work after 1.12.0 not synced (1.12.0 → 2.0.3)
 
-### 5. Build / project differences
-
-| Dimension | HIDMaestro 1.5.1 | GKMD |
-| --- | --- | --- |
-| Output | Class library `HIDMaestro.Core.dll` | Class library **`GKMD.dll`** |
-| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` |
-| Platform | x64 (`PlatformTarget`) | AnyCPU |
-| Namespaces | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
-| Directory structure | `HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` | Flattened to the root + the `Usbip/` subdirectory |
-| Driver resources | The `PackResources` target collects `HIDMaestro.dll`, two INFs, `hmswd.exe`, and the signtool/inf2cat dependency tree from `build/` and the local WDK | **Embeds no kernel driver/signing/catalog tools**; embeds only `Resources/USBip-0.9.8.1-x64.exe` and `THIRD-PARTY-NOTICES.txt` |
-| usbip-win2 acquisition | Build-time `DownloadFile` of 0.9.7.7 with SHA256 verification (fails on mismatch) | Embeds 0.9.8.1 directly, no download target (SHA256 still verified at runtime) |
-| Profile source | Linked and embedded from `profiles/**/*.json` (logical name `HIDMaestro.Profiles.*`) | No JSON resources, constructed in code by `StaticProfileRegistry.cs` |
-| Resource logical names | `HIDMaestro.Resources.*` | `GKMD.Resources.*` |
-| Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
-| Two-phase build | Required (build the native driver first to populate `Resources/`, then `dotnet build` twice to embed) | Not required; resources are fixed files |
-| Version | Upstream version number (1.x) | `4.6.1.0` (follows GKME) |
-| AOT / trimming | Not annotated for AOT | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); the host publishes with `PublishAot` |
-| Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
+- **2.0.0** replaces the device layer with JSON data and compiled programs, adds strict profile validation with JSON paths, `HMPort`, identity keys/leases, NativeAOT, ARM64 payloads, the Wii U GameCube adapter and 337 profiles. These are architectural changes, not fixes that can be ported into GKMD's static C# registry.
+- **2.0.1 – 2.0.3** install usbip-win2's host controller files directly, add `HMUninstall` and removal of usbip-win2's host controller and root-hub filter, and correct the Valve personas. GKMD deliberately keeps the official usbip-win2 installer and the probe-only install policy, and has no Valve personas to correct.
+- 1.6.0 – 1.12.0 features such as VR, Valve personas, Switch 2 Pro, keyboard/mouse profiles, PS Move and DualShock 3 pressure are new personas or APIs rather than fixes; see section 4.
 
 ## Directory structure
 
@@ -150,6 +186,7 @@ GKMD/
 │   ├── UsbipEmulatedDevice.cs  # Device-side behavior (HID / GIP / Switch / vendor)
 │   ├── UsbDescriptorSet.cs / UsbConfigurationSpec.cs
 │   ├── UsbipDriverInstaller.cs # Deploy/upgrade usbip-win2
+│   ├── UsbipInstallRequiredException.cs / UsbipRebootRequiredException.cs
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
 └── Resources/

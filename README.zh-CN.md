@@ -13,7 +13,10 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 面向「纯 USB/IP 后端 + 固定内建 profile」的删减、改写与新增。
 
 - 上游项目：https://github.com/hifihedgehog/HIDMaestro
-- 上游版本：`v1.5.1`
+- 来源版本：`v1.5.1`
+- **对比的最新上游：`v2.0.3`**（2026-10-22）。当前版本已把设备行为迁到 JSON profile +
+  编译程序，并带有 identity key、传输自动安装、卸载、VR 与 ARM64 载荷；同时改动了公开 API，
+  1.x 程序必须迁移到 2.0。
 - 上游许可：MIT License（见 `LICENSE`，GKMD 保留原始版权声明）
 - 命名空间：`HIDMaestro` / `HIDMaestro.Internal` / `HIDMaestro.Internal.Usbip`
   → `GKMD` / `GKMD.Internal` / `GKMD.Internal.Usbip`
@@ -23,45 +26,94 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
   → `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*`
 
 > 注意：GKMD 是 GKME 项目内长期演进后的驱动分支的独立化产物，**不是** HIDMaestro 1.5.1 的
-> 逐行精简单文件拷贝。下表的「差异」即相对 1.5.1 的全部已知改动。
+> 逐行精简单文件拷贝。本文档除特别标注「1.5.1 基线」的行外，均以**最新上游 v2.0.3** 为对比对象。
+> 由于 GKMD 停留在 1.5.1 派生 API 上，它同样缺少上游 1.6.0 至 2.0.3 中依赖 2.0 数据模型的改动；
+> GKMD 已同步的上游修复最新到 1.12.0。
 
-## 差异总表
+## 与 HIDMaestro 2.0.3 的差异
 
 ### 1. 传输 / 驱动架构
 
-| 维度 | HIDMaestro 1.5.1 | GKMD |
+| 维度 | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
 | 控制器创建路径 | 按 `RequiresUsbipBackend` 分支：普通 profile 走 UMDF2 + PnP，复合 persona 走 USB/IP | **无分支，全部走 USB/IP**（`CreateController` / `CreateControllerAt` 均调用 `CreateUsbipController`） |
-| 驱动模型 | UMDF2 内核态用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP | 纯 USB/IP：usbip-win2 虚拟主机控制器 + vHCI，**无内核驱动、无 INF、无设备节点** |
-| 设备节点 | 创建 root-enumerated / SWD PnP devnode，写入 friendly name / ControllerIndex | 无 PnP devnode，设备字符串直接来自 USB 描述符 |
-| 传输安装 | `DriverBuilder.FullDeploy()`：自签证书 → 签名 → inf2cat → pnputil | `UsbipDriverInstaller` 部署 / 升级 usbip-win2 |
-| usbip-win2 版本 | 0.9.7.7 | **0.9.8.1**（IOCTL ABI、结构体同步更新） |
-| USB/IP 接收模式 | 仅零拷贝（zero-copy MDL） | 新增 `UsbipReceiveMode.LowLatency`（默认）/ `ZeroCopy` |
-| 安装策略 | 首次创建时静默自动安装 | 仅**探测**，缺失/过旧时抛 `UsbipInstallRequiredException` / `UsbipRebootRequiredException`，由宿主 App 显式安装 |
-| 音频引擎 | `Audio` 恒非空 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
-| 控制器索引释放 | 先移除设备再释放索引 | 先拆 USB/IP 设备再释放索引（避免快速切换时端口复用竞争） |
+| 驱动模型 | 普通 profile 使用 UMDF2 用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP；复合 persona 使用 usbip-win2 虚拟主机控制器。无内核态驱动 | 纯 USB/IP：usbip-win2 虚拟主机控制器 + vHCI，**无 UMDF2 驱动、无 INF、无 PnP 设备节点** |
+| 设备节点 | UMDF2 路径创建 root-enumerated / SWD PnP devnode，写入 friendly name / ControllerIndex；复合路径是 vhci USB 设备 | 无 PnP devnode，设备字符串直接来自 USB 描述符 |
+| 传输安装 | 2.0.1 起直接嵌入未修改的 x64 / ARM64 `usbip2_ude.inf` / `.sys` / `.cat`，由 SDK 自己注册 host controller devnode（`InstallHostController`）；不运行 usbip-win2 安装器，不安装其 root-hub filter，并记录安装内容 | `UsbipDriverInstaller` 嵌入并运行官方 x64 `USBip-0.9.8.1-x64.exe`（Inno）安装器 |
+| usbip-win2 版本 | 0.9.8.1，x64 + ARM64 载荷 | 0.9.8.1 安装器载荷（x64）；`VhciClient` 支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，并探测已安装驱动实际支持的布局 |
+| USB/IP 接收模式 | 始终走 IRP 接收路径（`wsk_events` 保持 false），无可选模式 | 0.9.8.x 上新增 `UsbipReceiveMode.LowLatency`（默认）/ `ZeroCopy`；0.9.7.x 始终走 MDL 路径 |
+| 安装策略 | 首次创建复合 persona 时静默安装内嵌传输；`InstallDriver()` 对 UMDF2 做同样的事 | 仅**探测**，缺失/过旧时抛 `UsbipInstallRequiredException` / `UsbipRebootRequiredException`，由宿主 App 显式安装 |
+| 音频引擎 | 复合 persona 通过 USB/IP 承载 USB Audio，SDK 自动安装传输 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
+| 控制器索引 / 身份释放 | lease + reservation 系统、identity key、多程序并存（无 key 的 1.12.0 程序落在 transport index 64 以上） | 先拆 USB/IP 设备再释放索引（避免快速切换时端口复用竞争） |
+| 卸载 | `HMUninstall` / `HIDMaestroUninstall.exe` 移除控制器、驱动包、证书、注册表与文件；2.0.3 还可移除 usbip-win2 及其 root-hub filter | 无卸载 API / 工具；由宿主 App 自行清理（`UsbipBackend.DetachAllOwned`） |
+| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | AnyCPU 托管 DLL；内嵌 usbip-win2 载荷仅 x64 |
 | 诊断日志 | `DeviceOrchestrator.LogDiag` | 改为 `Debug.WriteLine` |
 
-### 2. 新增功能
+### 2. Profile 与设备行为
+
+| 维度 | HIDMaestro 2.0.3 | GKMD |
+| --- | --- | --- |
+| Profile 来源 | 337 个内建 profile（其中 103 个键盘/鼠标），从 `profiles/**/*.json` 链接；支持运行时自定义 / 提取 profile；严格校验的 source-generated JSON | 由 `StaticProfileRegistry.cs` 以代码构造的 10 个 persona；**无 JSON 目录、无 profile 提取** |
+| Profile 校验 | 严格 schema；被拒文件记入 `HMContext.ProfileLoadIssues` 并给出 JSON 路径；代码构造的 profile 抛出带 `ProfileId` / `JsonPath` 的 `HMProfileException` | C# 编译期构造；无 schema / JSON 路径诊断 |
+| 设备行为 | 设备即数据：report 字段、feature 应答、协议与 report 程序都是 profile 键，`deviceModelFrom` 提供默认模型；目录内程序编译为代码，目录外 profile 由解释器运行同一套程序 | 固定的 C# builder（`HidDescriptorBuilder`、`HidReportBuilder`、`VendorBlobCodec`）与手写 responder |
+| 多控制器设备 | `HMPort` / `HMPortSet` 支持一个 report 内承载多个控制器的适配器、分插器和接收器 | 无 |
+| 设备身份 | `identityKey` + lease 让 parent / child / 接口路径 / DirectInput GUID / SDL 路径 / ContainerId / serial 在 dispose、重启、重启系统与驱动升级后保持稳定 | serial 按控制器索引变化；无捕获 serial 的 profile 生成稳定的合成 serial |
+| Persona 覆盖 | 337 个 profile：Xbox 360 家族、Xbox One / Series（UMDF2）、DualShock 3 / 4、DualSense、Switch Pro / Joy-Con / Switch 2 Pro、Valve Steam Controller / Steam Deck、VR 控制器、方向盘、键盘鼠标、Wii U GameCube 适配器、PS Move 等 | 10 个 persona：Xbox 360、Xbox One、Xbox Series X\|S、DualShock 4 v2、DualSense、Switch Pro、Joy-Con L/R、键盘、鼠标 |
+| Xbox One / Series 传输 | 通过 UMDF2 呈现为 Windows `xinputhid` 视角；USB 线上协议不是 GIP | 以 **GIP 厂商类设备**跑在 USB/IP 上（`045E:02EA` / `045E:0B12`），包含 `[MS-GIPUSB]` 信封 |
+| Switch | Switch Pro / Joy-Con / Switch 2 Pro 的蓝牙与 USB 描述符，协议数据在 profile 中 | Switch Pro / Joy-Con 走 USB，responder 在代码侧 |
+| 键盘 / 鼠标 | `SubmitKeyboard` / `SubmitMouse` / `SubmitConsumer`、LED 状态、绝对鼠标，以及 103 个真实设备 profile | GKME 使用的两个简单内建 persona |
+| VR | `HMVR` / `HMVRController` 与 OpenVR 驱动包 | 无 |
+| Sony 设备应答 | 由 profile 数据提供（firmware info、pairing info、calibration），蓝牙带 CRC-32 | 代码侧 DualShock 4 认证 / 序列号报文与 DualSense 测试指令处理器 |
+
+### 3. GKMD 特有功能
 
 | 功能 | 相关文件 | 说明 |
 | --- | --- | --- |
-| Xbox One GIP 协议 | `Usbip/GipProtocol.cs`、`Usbip/GipResponder.cs`、`Usbip/GipLog.cs`、`Usbip/UsbipEmulatedDevice.cs` | 厂商类 `045E:02EA` 实现 Microsoft Gaming Input Protocol：HELLO/announce/identify/status 握手、14 字节 `gip_gamepad_pkt_input` 输入、guide 虚拟键、主机命令（power/LED/rumble/identify）解码 |
-| Switch Pro / Joy-Con 响应器 | `Usbip/UsbipEmulatedDevice.cs`、`StaticProfileRegistry.cs` | `057E:2009/2006/2007`：0x80 USB init、0x01 子命令、0x30/0x21 帧、伪 SPI 镜像（IMU/摇杆校准、颜色、序列号、device type）、15 ms 流、IMU 开关、震动使能 |
-| 厂商类（非 HID）设备通道 | `UsbDescriptorSet.cs`、`UsbipEmulatedDevice.cs`、`UsbConfigurationSpec.cs` | 不透明 input report 原样透传；`vendorRequests` 表应答 EP0 vendor 请求（如 Xbox 360 `0xC1/0x01/0x0100` 能力报告）；只应答 `InputEndpoint`，其余 INT-IN 端点 STALL（避免 xusb22 生成幻影音频设备） |
-| Xbox 360 persona | `StaticProfileRegistry.BuildXbox360()` | 20 字节原生输入报告 + `VendorRequests` 能力报告，无 HID 描述符路径 |
-| DualShock 4 认证 / 序列号 | `Usbip/UsbipEmulatedDevice.cs` | 新增 `Ds4FeatureReport20`（JDM-050 序列号）与 `Ds4FeatureReport81`（`0x03030301` challenge response）；识别 `SET_FEATURE 0x80` 子命令 |
-| DualSense 测试指令 | `Usbip/SonyTestCommandHandler.cs` | torch/telemetry、Type2 tracability、BT MAC/patch、电池电压等 device_id/action_id 家族，支持多页/单页响应与头部注入 |
-| DualSense 固件信息更新 | `Usbip/UsbipEmulatedDevice.cs` | 固件串 `202510:10:32` → `202510:38`，版本/系列字段调整，新增 `GetDs5FirmwareInfo()` |
-| 高分辨率滚轮 | `UsbConfigurationSpec.ResolutionMultiplier` | 支持 `GET/SET_REPORT(Feature, 0)` 的 Resolution Multiplier，枚举时默认高分辨率 |
-| 设备序列号字符串 | `ControllerProfile.SerialNumberString`、`UsbDescriptorSet.cs` | iSerial 返回真实序列号（此前固定返回 null） |
-| 安装/重启异常类型 | `Usbip/UsbipInstallRequiredException.cs`、`Usbip/UsbipRebootRequiredException.cs` | 宿主 UI 可将「需安装 / 需重启」转成提示而非失败 |
-| 静态 profile 注册表 | `StaticProfileRegistry.cs` | 以代码构造内建 profile，替代上游的 JSON 目录/嵌入资源 |
-| 键盘 / 鼠标 HID persona | `StaticProfileRegistry.cs` | 内建 keyboard / mouse profile（GKME 用于虚拟键鼠） |
+| USB/IP 上的 GIP | `Usbip/GipProtocol.cs`、`Usbip/GipResponder.cs`、`Usbip/GipLog.cs` | Xbox One（`045E:02EA`）与 Xbox Series X\|S（`045E:0B12`）作为厂商类 USB 设备响应完整 GIP 握手（HELLO / announce / identify / status）、14 字节 `gip_gamepad_pkt_input`、guide 虚拟键，以及主机命令（power / LED / rumble / identify）。Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），形成 230 字节 blob；此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
+| 可选的 USB/IP 接收模式 | `Usbip/VhciClient.cs`、`Usbip/UsbipBackend.cs` | 0.9.8.x 上支持 `UsbipReceiveMode.LowLatency`（默认，`wsk_events`）/ `ZeroCopy`（MDL） |
+| 仅探测的安装策略 | `Usbip/UsbipInstallRequiredException.cs`、`Usbip/UsbipRebootRequiredException.cs` | 库不会在宿主意料之外安装驱动；宿主 UI 可将「需安装 / 需重启」转成提示 |
+| 代码定义的 profile 注册表 | `StaticProfileRegistry.cs` | 内建 persona 就是普通 C# 代码，不依赖 JSON 或反射 |
+| 代码侧 Sony 处理器 | `Usbip/SonyTestCommandHandler.cs`、`Usbip/UsbipEmulatedDevice.cs` | DualSense 测试指令（torch/telemetry、Type2 tracability、BT MAC/patch、电池电压）与 DualShock 4 `0x20` / `0x81` feature report（`0x03030301` challenge response） |
+| 高分辨率滚轮 | `UsbConfigurationSpec.ResolutionMultiplier` | 应答 `GET/SET_REPORT(Feature, 0)`，枚举时默认高分辨率 |
+| 对 AOT 友好的类库 | `GKMD.csproj`、`GKLayoutLoader.cs` | `IsAotCompatible=true`；仅对基于反射的 layout JSON 路径做局部抑制 |
+| GKME 集成 | `AssemblyInfo.cs` | 由 [GKME](../GKME-Windows) 通过 `ProjectReference` 引用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
 
-### 3. 移除的组件 / 功能
+### 4. GKMD 未采用的上游工作（1.6.0 → 2.0.3）
 
-| 文件 / 功能（1.5.1 中存在） | 原有职责 |
+只同步了适用于纯 USB/IP 架构、且截至 1.12.0 已存在的修复。以下上游工作没有进入 GKMD：
+
+- **1.6.0 – 1.7.3**：虚拟 VR 控制器与 OpenVR 驱动、Valve persona（Steam Controller、Steam Deck）、Steam Controller 2 raw report、Xbox 360 家族的 WGI gamepad 呈现、legacy `GetControllerState`、原生二进制版本标记。
+- **1.8.0 – 1.12.0**：身份 / 音频 / DualShock 4 修复（其中与 USB/IP 相关的**已同步**，见下文）、带 motion 的 Switch 2 Pro（1.11.0）、103 个键盘/鼠标 profile 与键盘鼠标 API（1.12.0），以及其它 catalog 与 persona 工作。
+- **2.0.0**：devices-as-data 的 report 字段、feature 应答、协议与 report 程序；`ProgramForm` 编译器 / 解释器；`deviceModelFrom` 模型；带 JSON 路径的严格 profile 校验；`HMPort`；identity key 与 lease；`HMBuildInfo`；NativeAOT 支持；ARM64 驱动/传输载荷；Wii U GameCube 适配器；PS Move 与 DualShock 3 的数据化形态；337 个 profile 目录。
+- **2.0.1 – 2.0.3**：不运行 usbip-win2 安装器而直接安装其 host controller 文件、`HMUninstall` / `HIDMaestroUninstall.exe`、移除 usbip-win2 host controller 与 root-hub filter，以及 Valve persona 修正。
+
+GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的静态注册表和 1.x 派生的控制器 API。
+
+### 5. 构建 / 工程差异
+
+| 维度 | HIDMaestro 2.0.3 | GKMD |
+| --- | --- | --- |
+| 产物 | 类库 `HIDMaestro.Core.dll` | 类库 **`GKMD.dll`** |
+| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` |
+| Platform | AnyCPU | AnyCPU |
+| 命名空间 | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
+| 目录结构 | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | 扁平化到根目录 + `Usbip/` 子目录 |
+| 驱动资源 | 嵌入 UMDF2 驱动 + XUSB companion + SWD helper + INF + 签名/编目工具 + OpenVR 驱动 + `usbip2_ude` 文件，x64 与 ARM64 各一套 | **不嵌入任何内核 / UMDF2 驱动及签名/编目工具**，仅嵌入 `Resources/USBip-0.9.8.1-x64.exe` 与 `THIRD-PARTY-NOTICES.txt` |
+| usbip-win2 获取 | 构建时由 `prepare_usbip.ps1` 解包固定版本的 0.9.8.1 安装器，生成各架构 host controller 文件 | 直接嵌入 0.9.8.1，无下载目标；运行时校验 SHA-256 |
+| Profile 来源 | `profiles/` 下 348 个 JSON 文件；2.0.3 目录暴露 337 个内建 profile，以 source-generated JSON 编译进程序集 | 无 JSON 资源，由 `StaticProfileRegistry.cs` 代码构造 |
+| 资源逻辑名 | `HIDMaestro.*` | `GKMD.Resources.*` |
+| 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
+| 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
+| 版本 | `2.0.3` | `4.6.1.0`（跟随 GKME） |
+| AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制；由宿主以 `PublishAot` 发布 |
+| ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 托管 AnyCPU 程序集；捆绑的 usbip-win2 载荷仅 x64 |
+| 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
+
+### 6. 未从 1.5.1 基线继承的组件（附录）
+
+这些组件存在于 1.5.1 基线。上游 2.0.3 仍保留其中大部分（若干已扩展；`SwitchProPacker` 已被 profile state block 取代）；GKMD 均不包含。
+
+| 文件 / 功能（上游存在） | 原有职责 |
 | --- | --- |
 | `HMDeviceExtractor.cs` | 从已连接物理 HID 设备提取完整 profile（枚举 + 重建描述符） |
 | `HMHidDeviceInfo.cs` | `ListDevices()` 的轻量 HID 设备信息 DTO |
@@ -84,7 +136,9 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 功能：UMDF2 生命周期 | `InstallDriver` 的 ghost sweep / `FullDeploy`、`_batchDisposing`、`RemoveOrphanHidChildrenBatch`、后台预热任务 |
 | `HIDMaestro.Core.csproj` | 上游 SDK 工程文件，由 `GKMD.csproj` 取代 |
 
-### 4. 修改的文件（功能差异）
+### 7. 相对 1.5.1 基线的文件级改动（附录）
+
+以下是 GKMD 对 1.5.1 文件所做的改动。上游 2.0.3 此后已重写其中许多文件，因此本表记录的是 GKMD 的派生过程，而非 2.0.3 的当前实现。
 
 | 文件 | 主要变更 |
 | --- | --- |
@@ -95,20 +149,21 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | `UsbConfigurationSpec.cs` | 新增 `InputReportSize`、`VendorRequests`（含 `VendorControlRequest` 类型）、`Gip`、`ResolutionMultiplier`；注释改为 USB/IP persona 描述符集 |
 | `UsbDescriptorSet.cs` | `ReportDescriptor` 可空、新增 `HasHidInterface` / `InputEndpoint`；解析厂商 0x21 class descriptor；HID 接口改为可选；新增 `GetClassDescriptor`；iSerial 返回真实序列号；按控制器索引变化已捕获的 serial，并为无 serial 的 profile 提供稳定的合成 serial（上游 1.8.0 身份修复） |
 | `UsbipBackend.cs` | `Attach` 传 `UsbipReceiveMode.LowLatency`；`UsbipBackendHandle.Dispose` 增加 `WaitForPortDetached`（含一次重试），避免快速模式切换复用未清理端口 |
-| `UsbipDriverInstaller.cs` | 版本/SHA 升 0.9.8.0；`EnsureInstalled` 改为校验 ABI 并抛「需安装/需重启」异常；新增 `Install(interactive)`、Inno 退出码解析（0/3010）、`NeedsRebootThisBoot` 标记、`WaitForCurrentAbi`、`IsCurrentAbi`；`StampOwnerHardwareId` 改为枚举 `ROOT\USB\0000..000F` 并逐个打标 |
+| `UsbipDriverInstaller.cs` | 固定 **0.9.8.1** 并校验该 release 的 SHA-256；`EnsureInstalled` 校验 ABI 并抛「需安装/需重启」异常；新增 `Install(interactive)`、Inno 退出码解析（0/3010）、`NeedsRebootThisBoot` 标记、`WaitForCurrentAbi`、`IsCurrentAbi`；调用 `VhciClient.IsCurrentAbi()`，使 0.9.8.1 / 0.9.8.0 / 0.9.7.x 都能被识别；`StampOwnerHardwareId` 枚举 `ROOT\USB\0000..000F` 并逐个打标 |
+| `VhciClient.cs` | 支持**三套 vHCI 布局**并探测已安装驱动的那一套：0.9.8.1（`plugin_hardware` 1124、stop 1108、行 1132，`port` 后新增 `location_hash`）、0.9.8.0（1120 / 1104 / 1128）、0.9.7.x（1100 / 1104 / 1108，无 `wsk_events`）；`Attach` 新增 `UsbipReceiveMode` 参数；`Detach` 将 ≤0 归一化为 `PORT_ALL(-1)`；新增 `WaitForPortDetached`、`IsCurrentAbi`、`InstalledLayout`、`UsbipReceiveMode` |
+| `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；注释跟随 0.9.8.x 线上协议 |
 | `UsbipEmulatedDevice.cs` | 新增 GIP / Switch 两条 input pump 分支、厂商类不透明上报、`vendorRequests`、Resolution Multiplier、DS4 0x20/0x81、DualSense 测试指令；仅应答 `InputEndpoint`；`Audio` 可空；重连/重置清理；GIP 错误日志；同步上游 1.10.0 的 DualShock 4 `0x01` 偏移与 `0x05` 校准；把接口 / alt setting 传给音频引擎 |
-| `VhciClient.cs` | `plugin_hardware` 结构扩至 1120 字节（新增 serial / wsk_events）、`imported_device` 行 1128 字节；`Attach` 新增 `UsbipReceiveMode` 参数；`Detach` 将 ≤0 归一化为 `PORT_ALL(-1)`；新增 `WaitForPortDetached`、`IsCurrentAbi`、`UsbipReceiveMode` 枚举 |
-| `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；注释版本升 0.9.8.0 |
+| `Usbip/GipResponder.cs` | Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），重算 device / total / client-command 偏移后形成 230 字节 blob；Xbox One 的 `InputReportSize` 从 18 修正为 14。此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
+| `Usbip/UsbAudioEngine.cs` | 版本语义跟随 0.9.8.x；`DeviceOrchestrator.LogDiag` → `Debug.WriteLine`；旧 filter 不转发 `SET_INTERFACE` 时，根据等时传输推断流的开启/关闭（上游 1.10.0 修复）；针对 0.9.8.1 filter 使用 bmRequestType 0x80 |
 | `GKProfile.cs` | 删除 `Backend` / `RequiresUsbipBackend`；`Connection` 改用 `IsNullOrEmpty` 判空；文档由「profile JSON」改为「catalog / 内建」 |
 | `GKLayoutLoader.cs` | 增加 `IL3050` / `IL2026` 抑制与 `System.Diagnostics.CodeAnalysis`，适配 AOT / 裁剪 |
 | `OemNameOverrideStore.cs` | 增加 `CA1416`（仅 Windows）平台兼容抑制 |
 | `GKUsbAudio.cs` | 注释更新；`device.Audio` 改为可空后加 `!` |
-| `UsbAudioEngine.cs` | 版本语义提到 0.9.8.0；`DeviceOrchestrator.LogDiag` → `Debug.WriteLine`；旧 filter 不转发 `SET_INTERFACE` 时，根据等时传输推断流的开启/关闭（上游 1.10.0 修复） |
 | `VendorBlobCodec.cs`、`VendorBlobProgram.cs` | 同步上游 1.10.0 的 DualShock 4 修复：`uint16-le` 传感器时间戳、触摸包计数器、电量 `fullValue`、cable 位，以及按 8 位触发值判定 `LT_DIGITAL` / `RT_DIGITAL` |
 | `HidReportBuilder.cs`、`HidDescriptorBuilder.cs`、`GKOutputDecodedEventArgs.cs`、`GKOutputEncoder.cs`、`GKProfileBuilder.cs` | 仅措辞/微小空判断语法，无功能变化 |
 | `GKGamepadState.cs`、`GKLayout.cs`、`GKOemNameOverride.cs`、`GKOutputPacket.cs`、`TimeoutScale.cs`、`UsbipProtocol.cs` | 除命名空间外**无差异** |
 
-#### 同步自 HIDMaestro 的修复（1.5.1 → 1.12.0）
+#### 已同步的上游修复（1.5.1 → 1.12.0）
 
 只采纳适用于纯 USB/IP 架构的修复：
 
@@ -116,26 +171,11 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 - **每控制器稳定 serial**（`46054b8`、`a396741`）：USB serial 按控制器索引变化；无捕获 serial 的 profile 生成稳定的合成 serial。Windows 以它作为 USB 实例 ID，而不再依赖 vhci 端口。
 - **DualShock 4 报文**（`fd86c1a`）：`0x01` 各字段落在 SDL/Linux 读取的偏移；传感器时间戳按 16/3 µs 递增；电量/充满/cable 与触摸字段符合真实手柄；`LT_DIGITAL` / `RT_DIGITAL` 按 8 位触发值判定；校准改为单位校准（8192/g、16/°/s），并提供 DS4 的 `0x05` 顺序。
 
-以下内容未同步（不适用，或属于新人格/新功能而非修复）：UMDF2 驱动、`DeviceManager`、XUSB companion、VR / Valve / Switch 2 / 键盘鼠标功能，以及 ARM64 打包。
+#### 1.12.0 之后未同步的上游工作（1.12.0 → 2.0.3）
 
-### 5. 构建 / 工程差异
-
-| 维度 | HIDMaestro 1.5.1 | GKMD |
-| --- | --- | --- |
-| 产物 | 类库 `HIDMaestro.Core.dll` | 类库 **`GKMD.dll`** |
-| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` |
-| Platform | x64（`PlatformTarget`） | AnyCPU |
-| 命名空间 | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
-| 目录结构 | `HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` | 扁平化到根目录 + `Usbip/` 子目录 |
-| 驱动资源 | `PackResources` 目标从 `build/` 与本地 WDK 收集 `HIDMaestro.dll`、两个 INF、`hmswd.exe`、signtool/inf2cat 依赖树 | **不嵌入任何内核驱动/签名/编目工具**，仅嵌入 `Resources/USBip-0.9.8.1-x64.exe` 与 `THIRD-PARTY-NOTICES.txt` |
-| usbip-win2 获取 | 构建时 `DownloadFile` 拉取 0.9.7.7 并 SHA256 校验（不匹配则失败） | 直接嵌入 0.9.8.1，无下载目标（运行时仍校验 SHA256） |
-| Profile 来源 | 从 `profiles/**/*.json` 链接嵌入（逻辑名 `HIDMaestro.Profiles.*`） | 无 JSON 资源，由 `StaticProfileRegistry.cs` 代码构造 |
-| 资源逻辑名 | `HIDMaestro.Resources.*` | `GKMD.Resources.*` |
-| 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
-| 双阶段构建 | 需要（先构建原生驱动填充 `Resources/`，再两次 `dotnet build` 嵌入） | 不需要，资源为固定文件 |
-| 版本 | 上游版本号（1.x） | `4.6.1.0`（跟随 GKME） |
-| AOT / trimming | 未做 AOT 标注 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；由宿主以 `PublishAot` 发布 |
-| 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
+- **2.0.0** 把设备层换成 JSON 数据 + 编译程序，新增带 JSON 路径的严格 profile 校验、`HMPort`、identity key / lease、NativeAOT、ARM64 载荷、Wii U GameCube 适配器与 337 个 profile。这些是架构性改动，无法直接移植进 GKMD 的静态 C# 注册表。
+- **2.0.1 – 2.0.3** 直接安装 usbip-win2 host controller 文件，新增 `HMUninstall` 与 usbip-win2 host controller / root-hub filter 移除，并修正 Valve persona。GKMD 有意保留官方 usbip-win2 安装器与仅探测的安装策略，也没有 Valve persona 需要修正。
+- 1.6.0 – 1.12.0 之间的 VR、Valve persona、Switch 2 Pro、键盘/鼠标 profile、PS Move、DualShock 3 压力等属于新 persona 或新 API，而非可移植修复；见第 4 节。
 
 ## 目录结构
 
@@ -155,6 +195,7 @@ GKMD/
 │   ├── UsbipEmulatedDevice.cs  # 设备端行为（HID / GIP / Switch / vendor）
 │   ├── UsbDescriptorSet.cs / UsbConfigurationSpec.cs
 │   ├── UsbipDriverInstaller.cs # 部署/升级 usbip-win2
+│   ├── UsbipInstallRequiredException.cs / UsbipRebootRequiredException.cs
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
 └── Resources/
