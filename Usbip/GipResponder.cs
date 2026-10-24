@@ -72,10 +72,8 @@ internal sealed class GipResponder
         _productId = series ? SeriesProductId : ProductId;
         _hello = BuildHello(index);
         _status = BuildStatus();
-        _metadata = series ? BuildSeriesMetadata() : Convert.FromHexString(MetadataBlobHex);
+        _metadata = series ? BuildSeriesMetadata() : BuildXboxOneMetadata();
         _serial = BuildSerial(index);
-        if (!series && _metadata.Length != 182)
-            throw new InvalidOperationException($"GIP metadata blob is {_metadata.Length} bytes, expected 182.");
     }
 
     private byte NextSeq()
@@ -330,16 +328,101 @@ internal sealed class GipResponder
         return p;
     }
 
+    // ── Capability metadata ──────────────────────────────────────────────
+
+    /// <summary>Windows security-exchange opt-out GUID
+    /// {7a34ce77-7de2-45c6-8ca4-0042c08bd94a} ([MS-GIPUSB] 5.1). Advertising
+    /// it lets the PC host finish identification without the authenticate
+    /// exchange, which this responder does not implement.</summary>
+    private static readonly byte[] SecurityOptOutGuid =
+    {
+        0x77, 0xCE, 0x34, 0x7A, 0xE2, 0x7D, 0xC6, 0x45,
+        0x8C, 0xA4, 0x00, 0x42, 0xC0, 0x8B, 0xD9, 0x4A,
+    };
+
+    /// <summary>Xbox One metadata: the 214-byte blob a real Xbox One gamepad
+    /// reports, with the PC security opt-out appended to its interface list.
+    ///
+    /// <para>The [MS-GIPUSB] 2.2.2 example blob used before was a generic
+    /// sample, not a capture: one firmware version, two client commands and
+    /// three interfaces, with INavigationController overwritten by the opt-out
+    /// GUID. Windows' xboxgip.sys binds the 02EA/02DD gamepad shape, and the
+    /// reduced blob makes it take a path it does not fully initialise
+    /// (reported as a bugcheck when the device is created). The Series
+    /// persona has always used a full-sized (214-byte) blob, which is why it
+    /// was unaffected. Use the real layout and append the opt-out instead of
+    /// replacing navigation.</para>
+    ///
+    /// <para>Compared with the capture, the only edits are the interface
+    /// count, the extra 16-byte GUID, the two length fields that follow from
+    /// it, and the client-command offset at byte 16.</para></summary>
+    private static byte[] BuildXboxOneMetadata()
+    {
+        var baseBlob = Convert.FromHexString(XboxOneMetadataHex); // 214 bytes
+        const int interfacesOffset = 118; // count byte of the 3-GUID list
+        const int messagesStart = 167;    // 16 + device metadata length (151)
+
+        if (baseBlob.Length != 214 || baseBlob[interfacesOffset] != 3 || baseBlob[messagesStart] != 2)
+            throw new InvalidOperationException("Xbox One GIP metadata capture is malformed.");
+
+        int interfaceCount = baseBlob[interfacesOffset];
+        int guidBytes = interfaceCount * 16;
+        int messagesLen = baseBlob.Length - messagesStart;            // 47
+        int newMessagesStart = interfacesOffset + 1 + guidBytes + 16; // 183
+        int total = newMessagesStart + messagesLen;                   // 230
+
+        var blob = new byte[total];
+        Array.Copy(baseBlob, 0, blob, 0, interfacesOffset);
+        blob[interfacesOffset] = (byte)(interfaceCount + 1);
+        Array.Copy(baseBlob, interfacesOffset + 1, blob, interfacesOffset + 1, guidBytes);
+        Array.Copy(SecurityOptOutGuid, 0, blob, interfacesOffset + 1 + guidBytes, 16);
+        Array.Copy(baseBlob, messagesStart, blob, newMessagesStart, messagesLen);
+
+        // The client-command offset (relative to the 16-byte header) doubles
+        // as the device metadata length, and the first two header bytes are
+        // that u16. The total length lives at bytes 14-15.
+        int deviceLength = newMessagesStart - 16;
+        blob[16] = (byte)deviceLength;
+        blob[17] = (byte)(deviceLength >> 8);
+        blob[14] = (byte)total;
+        blob[15] = (byte)(total >> 8);
+        return blob;
+    }
+
+    // Real Xbox One gamepad capability metadata, 214 bytes, captured from a
+    // first-revision Microsoft gamepad (VID 045E / PID 02DD) and matching the
+    // Model 1708 (PID 02EA) shape: eight supported firmware versions, the full
+    // in/out system command lists, preferred type "Windows.Xbox.Input.Gamepad",
+    // interfaces IController / IGamepad / INavigationController, and the 0x20
+    // (input, 14 bytes) and 0x09 (rumble, max 60 bytes) message declarations.
+    // BuildXboxOneMetadata appends the PC security opt-out without removing
+    // navigation.
+    private const string XboxOneMetadataHex =
+        "1000010000000000000000000000D600" +
+        "97001600370038004100490066000000" +
+        "00000000000008010000000100010001" +
+        "00020001000300020000000200010002" +
+        "0002000200030000080102030406070C" +
+        "1E07010405060A0C1E011A0057696E64" +
+        "6F77732E58626F782E496E7075742E47" +
+        "616D657061640356FF7697FD9B8145AD" +
+        "45B645BBA526D62C402E08DF07E145A5" +
+        "ABA3127AF197B5E71FF3B88673E940A9" +
+        "F82F21263ACFB7021700200E00010010" +
+        "00000000000000000000000000000017" +
+        "00093C00010008000000000000000000" +
+        "000000000000";
+
     // Xbox Series X|S metadata: the same shape as the [MS-GIPUSB] 2.2.2
     // example, but the supported-interface list adds the console-function-map
     // and dynamic-latency GUIDs and the 0x20 input message is declared 40 bytes
     // (14-byte gamepad body + 18-byte console function map + 8-byte dynamic
-    // latency). Built by splicing the proven 182-byte Xbox One blob, so every
-    // offset, the firmware block and the message/preferred-type blocks stay
-    // byte-for-byte identical to the validated persona.
+    // latency). Built by splicing the 182-byte base blob, so every offset, the
+    // firmware block and the message/preferred-type blocks stay byte-for-byte
+    // identical to the validated persona.
     private static byte[] BuildSeriesMetadata()
     {
-        var baseBlob = Convert.FromHexString(MetadataBlobHex); // 182 bytes
+        var baseBlob = Convert.FromHexString(SeriesBaseMetadataHex); // 182 bytes
         const int deviceStart = 16;
         const int supportedOffset = 86;               // count byte of the Xbox One 3-GUID list
         const int baseDeviceLength = 119;
@@ -352,7 +435,7 @@ internal sealed class GipResponder
             // IGamepad {082e402c-07df-45e1-a5ab-a3127af197b5}
             new byte[] { 0x2C, 0x40, 0x2E, 0x08, 0xDF, 0x07, 0xE1, 0x45, 0xA5, 0xAB, 0xA3, 0x12, 0x7A, 0xF1, 0x97, 0xB5 },
             // IDevAuthPCOptOut {7a34ce77-7de2-45c6-8ca4-0042c08bd94a}
-            new byte[] { 0x77, 0xCE, 0x34, 0x7A, 0xE2, 0x7D, 0xC6, 0x45, 0x8C, 0xA4, 0x00, 0x42, 0xC0, 0x8B, 0xD9, 0x4A },
+            SecurityOptOutGuid,
             // IConsoleFunctionMap_InputReport {ecddd2fe-d387-4294-bd96-1a712e3dc77d}
             new byte[] { 0xFE, 0xD2, 0xDD, 0xEC, 0x87, 0xD3, 0x94, 0x42, 0xBD, 0x96, 0x1A, 0x71, 0x2E, 0x3D, 0xC7, 0x7D },
             // DynamicLatencyInput {87f2e56b-c3bb-49b1-8265-fffff37799ee}
@@ -389,22 +472,19 @@ internal sealed class GipResponder
         return blob;
     }
 
-    // Compiled GIP Gamepad metadata blob, 182 bytes, from [MS-GIPUSB]
-    // section 2.2.2, with one deliberate edit: the third SupportedInterfaces
-    // GUID (INavigationController) is replaced, byte-for-byte in place, with
-    // the security-exchange opt-out GUID 7a34ce77-7de2-45c6-8ca4-0042c08bd94a
-    // (bytes 0x77..0x86). [MS-GIPUSB] 5.1: "Controllers that talk to a
-    // Windows PC SHOULD use the following GUID to opt-out of the security
-    // exchange over USB... The host succeeds the security exchange by
-    // default." Replacing a GUID keeps the element count and every offset
-    // unchanged, so the blob stays 182 bytes. IController and IGamepad are
-    // preserved; INavigationController is not needed by a plain gamepad.
+    // Base blob for the Series splice, 182 bytes, from [MS-GIPUSB] section
+    // 2.2.2, with one deliberate edit: the third SupportedInterfaces GUID
+    // (INavigationController) is replaced, byte-for-byte in place, with the
+    // security-exchange opt-out GUID (bytes 0x77..0x86). Replacing a GUID
+    // keeps the element count and every offset unchanged, so the blob stays
+    // 182 bytes. The Series persona validates this shape, so it keeps using it
+    // as-is; the Xbox One persona now uses the full hardware capture above.
     //
     // Preferred type "Windows.Xbox.Input.Gamepad", interfaces
     // IController/IGamepad/[opt-out], and the 0x20 (input, 14 bytes,
     // upstream) and 0x09 (rumble, 9 bytes, downstream) message
     // declarations.
-    private const string MetadataBlobHex =
+    private const string SeriesBaseMetadataHex =
         "1000010000000000000000000000B600" +
         "770016001B001C002300290046000000" +
         "00000000000001010000000006010203" +

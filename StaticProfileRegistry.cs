@@ -176,7 +176,10 @@ internal static class StaticProfileRegistry
                 "0904000002FF47D000" +
                 "07058103400004" +
                 "07050103400004",
-            InputReportSize = 18,
+            // The GIP 0x20 message carries the 14-byte gamepad body; the
+            // 4-byte GIP header is framing the responder adds, not part of
+            // the report a consumer submits.
+            InputReportSize = 14,
             Interfaces = new List<UsbInterfaceSpec>
             {
                 new UsbInterfaceSpec
@@ -209,7 +212,7 @@ internal static class StaticProfileRegistry
             ProductString = "Controller",
             ManufacturerString = "Microsoft",
             Type = "gamepad",
-            InputReportSize = 18,
+            InputReportSize = 14,
             Notes = "Wired Xbox One controller (Model 1708, VID 045E:02EA) as a " +
                     "genuine vendor-class GIP device. Windows binds dc1-controller.inf " +
                     "(xboxgip.sys) and the GIP attachment becomes a HID child that " +
