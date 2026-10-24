@@ -16,29 +16,23 @@ namespace GKMD.Internal.Usbip;
 /// per the 0.9.8.0 wire contract read at source (see
 /// <see cref="UsbipProtocol"/>).
 ///
-/// <para>The listen port is fixed-range rather than ephemeral
+/// <para>The listen port is a fixed range rather than ephemeral
 /// (<see cref="BasePort"/>..+15, first free wins) so a later process can
 /// name this server's host/service tuple when cleaning up after a crash:
 /// the vhci driver starts background re-attach attempts when a connection
 /// drops without a PLUGOUT (usbip-win2 device.cpp detach →
 /// start_attach_attempts), and STOP_ATTACH_ATTEMPTS needs the exact
-/// location to cancel them. When every port in the range is taken, the
-/// server takes the first free port of a second range,
-/// <see cref="SecondBasePort"/>..+15, and only when that is full too an
-/// OS-assigned port. Both ranges sit below Windows' default dynamic port
-/// range, so a port a dead server held is in practice another GKMD server
-/// rather than an unrelated listener.</para></summary>
+/// location to cancel them. The range is GKMD's own, clear of HIDMaestro's
+/// 18509..18524 and 28509..28524 and FlexInput's 18008, so a sweep never
+/// takes another program's server for a dead GKMD one. When every port in
+/// the range is taken, the server takes an OS-assigned loopback port.</para></summary>
 internal sealed class UsbipServer : IDisposable
 {
-    /// <summary>0x484D, "GK". Outside the IANA ephemeral range, no
-    /// registered service on it, and never 3240 so a real usbipd on its
-    /// standard port is untouched.</summary>
-    public const int BasePort = 18509;
+    /// <summary>GKMD's own loopback range, clear of HIDMaestro's ranges and
+    /// FlexInput's port. Unassigned, outside the IANA ephemeral range, and
+    /// never 3240 so a real usbipd on its standard port is untouched.</summary>
+    public const int BasePort = 37286;
     public const int PortRange = 16;
-
-    /// <summary>The second range, taken when the first is full. Unassigned
-    /// in the IANA registry (28241-28588), below the dynamic range.</summary>
-    public const int SecondBasePort = 28509;
 
     /// <summary>How long a connection has to finish its handshake, the
     /// device list it asks for or the import reply it waits for, before the
@@ -87,24 +81,20 @@ internal sealed class UsbipServer : IDisposable
         Exception? last = null;
         TcpListener? listener = null;
         int port = 0;
-        foreach (int first in new[] { BasePort, SecondBasePort })
+        for (int i = 0; i < PortRange && listener == null; i++)
         {
-            for (int i = 0; i < PortRange && listener == null; i++)
+            try
             {
-                try
-                {
-                    var l = new TcpListener(IPAddress.Loopback, first + i);
-                    l.Start();
-                    listener = l;
-                    port = first + i;
-                }
-                catch (SocketException ex) { last = ex; }
+                var l = new TcpListener(IPAddress.Loopback, BasePort + i);
+                l.Start();
+                listener = l;
+                port = BasePort + i;
             }
-            if (listener != null) break;
+            catch (SocketException ex) { last = ex; }
         }
         if (listener == null)
         {
-            // Every port in both ranges is taken: another program, which may
+            // Every port in the range is taken: another program, which may
             // not be elevated, bound all of them first. Rather than fail
             // every composite persona, bind an OS-assigned loopback port
             // (port 0).
@@ -118,8 +108,8 @@ internal sealed class UsbipServer : IDisposable
             catch (SocketException ex) { last = ex; }
         }
         _listener = listener ?? throw new InvalidOperationException(
-            $"No free loopback port for the USB/IP server ({BasePort}..{BasePort + PortRange - 1}, " +
-            $"{SecondBasePort}..{SecondBasePort + PortRange - 1} and an OS-assigned port all failed).", last);
+            $"No free loopback port for the USB/IP server ({BasePort}..{BasePort + PortRange - 1} " +
+            "and an OS-assigned port all failed).", last);
         Port = port;
 
         _acceptThread = new Thread(AcceptLoop)

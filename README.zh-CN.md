@@ -153,7 +153,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | `UsbipBackend.cs` | `Attach` 传 `UsbipReceiveMode.LowLatency`；死服务清扫只拆除没有监听者的 import、只取消死 location 的 attempts；attach 失败会清理抢先进入的 import；`UsbipBackendHandle.Dispose` 按 location 拆除、等待其离开列表（含一次重试）并取消其 attempts |
 | `UsbipDriverInstaller.cs` | 固定 **0.9.8.1** 并校验该 release 的 SHA-256；`EnsureInstalled` 校验 ABI 并抛「需安装/需重启」异常；新增 `Install(interactive)`、Inno 退出码解析（0/3010）、`NeedsRebootThisBoot` 标记、`WaitForCurrentAbi`、`IsCurrentAbi`；调用 `VhciClient.IsCurrentAbi()`，使 0.9.8.1 / 0.9.8.0 / 0.9.7.x 都能被识别；`StampOwnerHardwareId` 枚举 `ROOT\USB\0000..000F` 并逐个打标 |
 | `VhciClient.cs` | 支持**三套 vHCI 布局**并探测已安装驱动的那一套：0.9.8.1（`plugin_hardware` 1124、stop 1108、行 1132，`port` 后新增 `location_hash`）、0.9.8.0（1120 / 1104 / 1128）、0.9.7.x（1100 / 1104 / 1108，无 `wsk_events`）；`Attach` 新增 `UsbipReceiveMode` 参数；`Detach` 将 ≤0 归一化为 `PORT_ALL(-1)`；新增 `WaitForPortDetached`、`DetachLocation`、`FindLocation`、`SamePort`、`WaitForLocationDetached`、批量 `StopAttachAttempts`、`IsCurrentAbi`、`InstalledLayout`、`UsbipReceiveMode` |
-| `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；新增仅接受 host controller 的导入、握手超时与并发上限、第二端口段与 OS 分配回退、未知 bus id 的 re-attach 取消、应答失败时的 claim 清理，以及设备 Dispose 后结束 import |
+| `UsbipServer.cs` | `Unregister` 增加身份校验（防止旧设备误删新设备）；新增仅接受 host controller 的导入、握手超时与并发上限、GKMD 独立端口段与 OS 分配回退、未知 bus id 的 re-attach 取消、应答失败时的 claim 清理，以及设备 Dispose 后结束 import |
 | `Usbip/TcpConnectionOwner.cs` | 新增：通过 `GetExtendedTcpTable` 把已接受的 loopback 连接映射到所属 PID，只有内核 WSK 连接（System，PID 4）可以导入 |
 | `UsbipEmulatedDevice.cs` | 新增 GIP / Switch 两条 input pump 分支、厂商类不透明上报、`vendorRequests`、Resolution Multiplier、DS4 0x20/0x81、DualSense 测试指令；仅应答 `InputEndpoint`；`Audio` 可空；重连/重置清理；GIP 错误日志；同步上游 1.10.0 的 DualShock 4 `0x01` 偏移与 `0x05` 校准；把接口 / alt setting 传给音频引擎；新增 `IsDisposed` / claim 检查、会唤醒输入泵的幂等 `Dispose`，以及描述符未声明 input report ID 时的 STALL |
 | `Usbip/GipResponder.cs` | Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），重算 device / total / client-command 偏移后形成 230 字节 blob；Xbox One 的 `InputReportSize` 从 18 修正为 14。此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
@@ -180,7 +180,6 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 
 - **仅接受 host controller 导入**（`TcpConnectionOwner`）：只有连接客户端属于 System 进程（PID 4，内核 WSK 连接的表现）时才接受 `OP_REQ_IMPORT`。本机其它程序不能再从另一个进程导入 persona。
 - **握手限制**：连接必须在 5 秒内完成导入握手；同时最多 16 个握手，超出且不是 host controller 打开的连接会在不创建线程的情况下关闭。
-- **端口耗尽**：`18509..18524` 用完后依次尝试 `28509..28524`，再退到 OS 分配的 loopback 端口，而不是让所有复合 persona 失败。
 - **死服务清扫**：只拆除端口上没有监听者（或本进程自己的端口上未导出的 bus id）的 import，并且只取消这些死 location 的 re-attach attempts。其它正在运行程序的 server 和 import 不会被触碰。
 - **按 location 拆除**：`DetachLocation` / `FindLocation` / `WaitForLocationDetached` 按 `(host, server 端口, bus id)` 拆除与等待，而不是按可能已被其它设备复用的 vhci 端口。
 - **注册闸门**：清扫期间新的注册会等待，避免新设备 attach 到清扫即将拆除的位置。
@@ -188,6 +187,8 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 - **释放**：被 Dispose 的设备会结束其打开的 import；handle 按 location 拆除并取消该 location 的 attempts；`Dispose` 会唤醒输入泵，而不再等满 500 ms 的帧等待；第二次 `Dispose` 直接返回。
 - **音频事件隔离**：control 与 stream 变化在专用 audio event thread 上按主机顺序触发，慢 handler 不会阻塞连接 reader 或音频泵；handler 抛出的异常会被丢弃，而不是结束连接或进程。
 - **GET_REPORT(Input)**：HID 描述符未声明的 report ID 返回 STALL，而不是最后一份报文。
+
+另有一项 GKMD 自身的调整：server 监听自己的 `37286..37301`，避开 HIDMaestro 的 `18509..18524` / `28509..28524` 与 FlexInput 的 `18008`，两者可并存而不会互相接管对方的 import。该段用完后回退到 OS 分配的 loopback 端口。
 
 以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：零分配 control/frame 路径（仅性能）、owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略）、ARM64 载荷，以及 2.0 数据模型。
 

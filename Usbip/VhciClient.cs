@@ -247,8 +247,8 @@ internal static class VhciClient
     }
 
     /// <summary>Whether an import's service string names this port. The
-    /// string is whatever the PLUGIN request carried, so "018509" or
-    /// " 18509" can name port 18509 as well as "18509" does. Compared as a
+    /// string is whatever the PLUGIN request carried, so "037286" or
+    /// " 37286" can name port 37286 as well as "37286" does. Compared as a
     /// number, the way the sweeps decide a row is on the SDK's ports, so
     /// every import a sweep picks is one it can detach.</summary>
     public static bool SamePort(string service, int port) =>

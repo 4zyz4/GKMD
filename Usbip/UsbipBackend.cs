@@ -121,9 +121,9 @@ internal static class UsbipBackend
     /// with a live listener may be another GKMD program's server, and
     /// canceling its attempts would cancel that program's own controller
     /// coming back. On this process's own port, only the bus ids it does
-    /// not export are canceled. Servers before the second port range
-    /// existed only bound the first range, so its legacy bus ids are tried
-    /// there alone; the whole list goes in one request per handle.</summary>
+    /// not export are canceled, which covers attempts a crashed prior GKMD
+    /// process left there. The whole list goes in one request per
+    /// handle.</summary>
     private static void CancelAttemptsForDeadPorts(int ownPort,
         System.Collections.Generic.HashSet<string> own, System.Collections.Generic.HashSet<int> listening)
     {
@@ -201,10 +201,8 @@ internal static class UsbipBackend
                 VhciClient.DetachLocation(row.Host, port, row.BusId);
             }
             var ports = new System.Collections.Generic.List<int>();
-            for (int first = UsbipServer.BasePort; first < UsbipServer.BasePort + UsbipServer.PortRange; first++)
-                ports.Add(first);
-            for (int first = UsbipServer.SecondBasePort; first < UsbipServer.SecondBasePort + UsbipServer.PortRange; first++)
-                ports.Add(first);
+            for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++)
+                ports.Add(port);
             if (ownPort > 0 && !ports.Contains(ownPort)) ports.Add(ownPort);
             var locations = new System.Collections.Generic.List<(int Port, string BusId)>();
             foreach (int port in ports)
@@ -217,11 +215,9 @@ internal static class UsbipBackend
 
     private static bool TryServicePort(string service, out int port) => int.TryParse(service, out port);
 
-    /// <summary>A port of one of the SDK's two ranges
-    /// (<see cref="UsbipServer"/>).</summary>
+    /// <summary>A port of GKMD's range (<see cref="UsbipServer"/>).</summary>
     private static bool IsOurPort(int port) =>
-        (port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange)
-        || (port >= UsbipServer.SecondBasePort && port < UsbipServer.SecondBasePort + UsbipServer.PortRange);
+        port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange;
 }
 
 /// <summary>The live backing of one usbip-backend controller. Disposal
