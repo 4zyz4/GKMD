@@ -1,5 +1,150 @@
 # Release notes
 
+## v4.7.0 — 2026-10-24 — HIDMaestro 2.0.3 runtime fixes
+
+**English** | [简体中文](#v470--2026-10-24--同步-hidmaestro-203-运行时修复)
+
+GKMD 4.7.0 syncs the USB/IP runtime fixes that landed in HIDMaestro 2.0.0–2.0.3,
+gives the server its own listen-port range so GKMD and HIDMaestro can run side
+by side, and fixes a bugcheck when creating an Xbox One persona.
+
+### Highlights
+
+- **HIDMaestro 2.0.3 transport sync** — `Dispose` wakes the input pump instead
+  of waiting out its 500 ms frame wait; only the host controller's connection
+  (System, PID 4, found via `GetExtendedTcpTable`) may import a device; a
+  connection has 5 s to finish its handshake and at most 16 handshakes run at
+  once; `GET_REPORT(Input)` STALLs a report ID the descriptor does not declare;
+  the claim is identity-checked on release and teardown survives a race with
+  the host's detach; detach is by location, since a vhci port may be reused;
+  and audio control/stream events are raised on a dedicated thread with a
+  throwing handler logged and dropped.
+- **Coexistence** — the server now listens on **37286..37301**, clear of
+  HIDMaestro's `18509..18524` / `28509..28524` and FlexInput's `18008`. The
+  stale sweep inspects only its own range and detaches only imports whose
+  server is gone, so neither program takes the other's imports or cancels its
+  re-attach attempts. When the range is full it falls back to an OS-assigned
+  loopback port.
+- **Xbox One persona bugcheck** — the GIP metadata blob is rebuilt at 230 bytes
+  from the real 214-byte gamepad metadata, appending the PC security opt-out as
+  a fourth interface and recomputing the device / total / client-command
+  offsets; `InputReportSize` is corrected from 18 to 14. The previous 182-byte
+  sample metadata made `xboxgip` bugcheck on create.
+
+### Compatibility
+
+- Controller personas are unchanged (Xbox One / Series X|S, Xbox 360,
+  Switch Pro / Joy-Con, DualShock 4, DualSense, wheel, keyboard, mouse).
+- Works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or 0.9.8.1**.
+- Runs alongside HIDMaestro 2.0.x and FlexInput; the port ranges do not overlap.
+
+### Artifact
+
+| File | Size | Notes |
+| --- | --- | --- |
+| `GKMD-v4.7.0.zip` | 25,424,258 bytes | Contains `GKMD.dll` (Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1), `LICENSE` and `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256: `C223A37D51A703046AD72D07016B185FFE4A1EB18A0ABAAB7CF4451654364460`
+
+Produced by `dotnet build -c Release -t:PackageRelease`; Native AOT compilation
+happens in the host application (GKME), not in this library.
+
+### Build / verify
+
+```powershell
+dotnet build -c Release
+dotnet build -c Release -t:PackageRelease
+dotnet publish -c Release -r win-x64 -p:PublishAot=true   # from a host project referencing GKMD.csproj
+```
+
+### Known limitations
+
+- The bundled usbip-win2 payload is x64-only.
+- Windows only (`net10.0-windows`).
+- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
+  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
+- The zero-allocation frame / output / control paths, owner records and
+  transport-index leases, direct usbip-win2 host-controller installation and
+  ARM64 payloads from 2.0.x are not synced (performance-only or not applicable
+  to GKMD's transport).
+
+### Credits & license
+
+Derived from HIDMaestro 1.5.1 (MIT); the original copyright notice is retained
+in [LICENSE](LICENSE). Bundled usbip-win2 is BSD-2-Clause, see
+[Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt).
+
+---
+
+## v4.7.0 — 2026-10-24 — 同步 HIDMaestro 2.0.3 运行时修复
+
+[English](#v470--2026-10-24--hidmaestro-203-runtime-fixes) | **简体中文**
+
+GKMD 4.7.0 同步 HIDMaestro 2.0.0–2.0.3 中适用于 USB/IP 架构的运行时修复，为 server
+分配独立的监听端口段，使 GKMD 与 HIDMaestro 可以并存，并修复创建 Xbox One 人格时的
+蓝屏。
+
+### 亮点
+
+- **HIDMaestro 2.0.3 传输层同步** — `Dispose` 唤醒输入泵，不再等满 500 ms 的帧等待；
+  只有宿主控制器连接（System 进程 PID 4，经 `GetExtendedTcpTable` 判定）才能导入
+  设备；连接须在 5 秒内完成握手，同时最多 16 个握手；`GET_REPORT(Input)` 对描述符
+  未声明的 report ID 返回 STALL；claim 在释放时做身份校验，teardown 与宿主 detach
+  竞态不再结束进程；按 location 拆除（vhci 端口会被复用）；音频 control/stream 事件
+  在专用线程上触发，handler 抛异常只记录并丢弃。
+- **并存** — server 监听 **37286..37301**，避开 HIDMaestro 的 `18509..18524` /
+  `28509..28524` 与 FlexInput 的 `18008`。死服务清扫只检查自己的端口段，只拆除
+  server 已消失的 import，因此两者不会互相接管 import 或取消对方的 re-attach
+  attempts。该段用满时回退到 OS 分配的 loopback 端口。
+- **Xbox One 人格蓝屏** — GIP 元数据 blob 以真实手柄的 214 字节 gamepad 元数据为基础
+  重建为 230 字节，把 PC security opt-out 追加为第 4 个 interface 并重算 device /
+  total / client-command 偏移；`InputReportSize` 从 18 修正为 14。此前的 182 字节
+  示例元数据会让 `xboxgip` 在创建设备时 bugcheck。
+
+### 兼容性
+
+- 各手柄人格不变（Xbox One / Series X|S、Xbox 360、Switch Pro / Joy-Con、
+  DualShock 4、DualSense、方向盘、键盘、鼠标）。
+- 兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**。
+- 可与 HIDMaestro 2.0.x 及 FlexInput 并存；端口段不重叠。
+
+### 产物
+
+| 文件 | 大小 | 说明 |
+| --- | --- | --- |
+| `GKMD-v4.7.0.zip` | 25,424,258 字节 | 内含 `GKMD.dll`（Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256：`C223A37D51A703046AD72D07016B185FFE4A1EB18A0ABAAB7CF4451654364460`
+
+由 `dotnet build -c Release -t:PackageRelease` 生成；Native AOT 编译在宿主应用
+（GKME）中完成，而非本类库。
+
+### 构建 / 验证
+
+```powershell
+dotnet build -c Release
+dotnet build -c Release -t:PackageRelease
+dotnet publish -c Release -r win-x64 -p:PublishAot=true   # 在引用 GKMD.csproj 的宿主工程中执行
+```
+
+### 已知限制
+
+- 内嵌的 usbip-win2 载荷仅支持 x64。
+- 仅支持 Windows（`net10.0-windows`）。
+- layout 序列化/反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT 宿主中，
+  `GKLayout*` 类型需由宿主保留。
+- 2.0.x 中的零分配 frame / output / control 路径、owner record 与 transport-index
+  lease、直接安装 usbip-win2 host controller 以及 ARM64 载荷未同步（仅性能优化或不
+  适用于 GKMD 的传输层）。
+
+### 致谢与许可
+
+派生自 HIDMaestro 1.5.1（MIT），原始版权声明保留在 [LICENSE](LICENSE)；
+捆绑的 usbip-win2 为 BSD-2-Clause，见
+[Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt)。
+
+---
+
 ## v4.6.1 — 2026-10-17 — HIDMaestro 1.12.0 fixes
 
 **English** | [简体中文](#v461--2026-10-17--同步-hidmaestro-1120-修复)
