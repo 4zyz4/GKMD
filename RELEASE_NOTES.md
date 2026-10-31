@@ -1,5 +1,120 @@
 # Release notes
 
+## v4.7.1 — 2026-10-31 — HIDMaestro 2.0.x allocation-free USB/IP and submit paths
+
+**English** | [简体中文](#v471--2026-10-31--同步-hidmaestro-20x-零分配-usbip-与-submit-路径)
+
+GKMD 4.7.1 takes the performance-only work issue #1 deferred: the USB/IP
+transfer, frame and control paths no longer allocate per transfer, audio URBs
+and frame buffers are pooled, and the input-section write and the submit paths
+do less work per frame.
+
+### Highlights
+
+- **Frames** — the input pump builds each report in its own buffer; queued
+  frames come from a pool and go back as soon as a read answers them or the
+  queue drops them; Switch and GIP frames are built in place,
+  `GET_REPORT(Input)` copies the latest report from under the HID lock, and a
+  non-byte-aligned report field of up to 32 bits goes in with one masked
+  read-modify-write instead of one pass per bit.
+- **Transfers** — the command reader owns a 4 KB receive buffer and reuses the
+  arrays for a submit's OUT data, isochronous descriptors and packets; audio
+  URBs are pooled with their packet and PCM arrays reused, and the microphone
+  completion fills one buffer the engine keeps.
+- **Control replies** — descriptors, status, configuration, interface, UAC
+  values, test-command pages, the resolution multiplier and the Sony feature
+  stubs are answered from the stack or a device-owned buffer; the vendor
+  request table's hex answers are decoded once at construction.
+- **Submit path** — `WriteInputFrame` stores through the section's pointer,
+  takes spans, orders the seqlock with one write barrier plus a release store,
+  and keeps the `SetEvent` doorbells out of line; `SubmitRawReport` writes a
+  frame with no fixed bytes straight from the caller's span; `SubmitState`
+  resolves the six simple slots only for the extended codec and the XUSB GIP
+  block, letting the descriptor path read the axes itself.
+
+### Compatibility
+
+- No public API or profile format change; controller personas are unchanged.
+- Works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or 0.9.8.1**.
+- The bytes on the wire and in the shared input section are unchanged.
+
+### Artifact
+
+| File | Size | Notes |
+| --- | --- | --- |
+| `GKMD-v4.7.1.zip` | 25,427,247 bytes | Contains `GKMD.dll` (Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1), `LICENSE` and `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256: `78571FA1DE4CA098CE0A0BF44CDCD07E238693C0B5C25D902C5543A440BB1B33`
+
+Produced by `dotnet build -c Release -t:PackageRelease`; Native AOT compilation
+happens in the host application (GKME), not in this library.
+
+### Known limitations
+
+- The bundled usbip-win2 payload is x64-only.
+- Windows only (`net10.0-windows`).
+- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
+  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
+- Owner records and transport-index leases, direct usbip-win2 host-controller
+  installation and ARM64 payloads from 2.0.x remain unsynced (not applicable to
+  GKMD's transport).
+
+---
+
+## v4.7.1 — 2026-10-31 — 同步 HIDMaestro 2.0.x 零分配 USB/IP 与 submit 路径
+
+[English](#v471--2026-10-31--hidmaestro-20x-allocation-free-usbip-and-submit-paths) | **简体中文**
+
+GKMD 4.7.1 接过 issue #1 中暂缓的纯性能工作：USB/IP 的传输、帧与 control
+路径不再逐次分配，audio URB 与帧缓冲改为池化，输入 section 的写入与 submit
+路径每帧做的工作也更少。
+
+### 亮点
+
+- **帧** — 输入泵在自己的缓冲里构建每一份报文；排队帧来自缓冲池，被读取应答
+  或队列淘汰后立即归还；Switch 与 GIP 帧就地构建；`GET_REPORT(Input)` 在 HID
+  锁内复制最新报文；不足一字节对齐、最多 32 位的报文字段改为一次掩码读改写，
+  而不是逐位循环。
+- **传输** — 命令 reader 自带 4 KB 接收缓冲，并复用 OUT 数据、等时描述符与包
+  数组；audio URB 池化，包与 PCM 数组复用；麦克风完成时填充引擎保留的一个
+  缓冲。
+- **control 应答** — 描述符、状态、配置、接口、UAC 值、test command 分页、
+  resolution multiplier 与 Sony feature stub 均从栈或设备自有缓冲发出；vendor
+  请求表的十六进制应答在构造时解码一次。
+- **submit 路径** — `WriteInputFrame` 通过 section 指针写入、接受 span，seqlock
+  只用一个 write barrier 加一次 release store，`SetEvent` 门铃移出内联；
+  `SubmitRawReport` 对没有固定字节的帧直接从调用方 span 写入；`SubmitState`
+  只在扩展 codec 与 XUSB GIP 块真正使用时才解析六个 simple slot，描述符路径由
+  `BuildReportInto` 自己读取轴值。
+
+### 兼容性
+
+- 无公开 API 或 profile 格式变化；各手柄人格不变。
+- 兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**。
+- 线上字节与共享输入 section 的字节不变。
+
+### 产物
+
+| 文件 | 大小 | 说明 |
+| --- | --- | --- |
+| `GKMD-v4.7.1.zip` | 25,427,247 字节 | 内含 `GKMD.dll`（Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256：`78571FA1DE4CA098CE0A0BF44CDCD07E238693C0B5C25D902C5543A440BB1B33`
+
+由 `dotnet build -c Release -t:PackageRelease` 生成；Native AOT 编译在宿主应用
+（GKME）中完成，而非本类库。
+
+### 已知限制
+
+- 内嵌的 usbip-win2 载荷仅支持 x64。
+- 仅支持 Windows（`net10.0-windows`）。
+- layout 序列化/反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT 宿主中，
+  `GKLayout*` 类型须由宿主保留。
+- 2.0.x 的 owner record 与 transport index lease、直接安装 usbip-win2 host
+  controller、ARM64 载荷仍未同步（不适用于 GKMD 的传输层）。
+
+---
+
 ## v4.7.0 — 2026-10-24 — HIDMaestro 2.0.3 runtime fixes
 
 **English** | [简体中文](#v470--2026-10-24--同步-hidmaestro-203-运行时修复)

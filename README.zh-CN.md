@@ -14,9 +14,9 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 
 - 上游项目：https://github.com/hifihedgehog/HIDMaestro
 - 来源版本：`v1.5.1`
-- **对比的最新上游：`v2.0.3`**（2026-10-22）。当前版本已把设备行为迁到 JSON profile +
+- **对比的上游基线：`v2.0.3`**（2026-10-22），API 与行为的对比以其为准。该版本已把设备行为迁到 JSON profile +
   编译程序，并带有 identity key、传输自动安装、卸载、VR 与 ARM64 载荷；同时改动了公开 API，
-  1.x 程序必须迁移到 2.0。
+  1.x 程序必须迁移到 2.0。2.1.0 的零分配 submit 路径另行同步。
 - 上游许可：MIT License（见 `LICENSE`，GKMD 保留原始版权声明）
 - 命名空间：`HIDMaestro` / `HIDMaestro.Internal` / `HIDMaestro.Internal.Usbip`
   → `GKMD` / `GKMD.Internal` / `GKMD.Internal.Usbip`
@@ -87,7 +87,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 - **2.0.0**：devices-as-data 的 report 字段、feature 应答、协议与 report 程序；`ProgramForm` 编译器 / 解释器；`deviceModelFrom` 模型；带 JSON 路径的严格 profile 校验；`HMPort`；identity key 与 lease；`HMBuildInfo`；NativeAOT 支持；ARM64 驱动/传输载荷；Wii U GameCube 适配器；PS Move 与 DualShock 3 的数据化形态；337 个 profile 目录。
 - **2.0.1 – 2.0.3**：不运行 usbip-win2 安装器而直接安装其 host controller 文件、`HMUninstall` / `HIDMaestroUninstall.exe`、移除 usbip-win2 host controller 与 root-hub filter，以及 Valve persona 修正。
 
-2.0.0 的 **USB/IP 运行时**修复**已同步**（仅接受 host controller 导入、握手超时与并发上限、死服务清扫、按 location 拆除、释放与音频事件加固；见第 7 节同步清单）。GKMD 未采用的是 2.0 数据模型、identity / lease 系统、2.0.1–2.0.3 的安装/卸载器，以及仅涉及性能的零分配改动。
+2.0.0 的 **USB/IP 运行时**修复**已同步**（仅接受 host controller 导入、握手超时与并发上限、死服务清扫、按 location 拆除、释放与音频事件加固；见第 7 节同步清单），2.0.x 的零分配帧、输出、control 与 submit 路径也已移植。GKMD 未采用的是 2.0 数据模型、identity / lease 系统，以及 2.0.1–2.0.3 的安装/卸载器。
 
 GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的静态注册表和 1.x 派生的控制器 API。
 
@@ -106,7 +106,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 资源逻辑名 | `HIDMaestro.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
-| 版本 | `2.0.3` | `4.7.0.0`（跟随 GKME） |
+| 版本 | `2.0.3` | `4.7.1.0`（跟随 GKME） |
 | AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制；由宿主以 `PublishAot` 发布 |
 | ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 托管 AnyCPU 程序集；捆绑的 usbip-win2 载荷仅 x64 |
 | 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
@@ -174,9 +174,9 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 - **每控制器稳定 serial**（`46054b8`、`a396741`）：USB serial 按控制器索引变化；无捕获 serial 的 profile 生成稳定的合成 serial。Windows 以它作为 USB 实例 ID，而不再依赖 vhci 端口。
 - **DualShock 4 报文**（`fd86c1a`）：`0x01` 各字段落在 SDL/Linux 读取的偏移；传感器时间戳按 16/3 µs 递增；电量/充满/cable 与触摸字段符合真实手柄；`LT_DIGITAL` / `RT_DIGITAL` 按 8 位触发值判定；校准改为单位校准（8192/g、16/°/s），并提供 DS4 的 `0x05` 顺序。
 
-#### 已同步的上游 USB/IP 修复（1.12.0 → 2.0.3）
+#### 已同步的上游 USB/IP 修复（1.12.0 → 2.1.0）
 
-以下 2.0.0 改动完全位于 USB/IP 传输与设备层，不依赖 2.0 数据模型，因此已移植：
+以下 2.0.x 与 2.1.0 改动完全位于 USB/IP 传输与设备层，不依赖 2.0 数据模型，因此已移植：
 
 - **仅接受 host controller 导入**（`TcpConnectionOwner`）：只有连接客户端属于 System 进程（PID 4，内核 WSK 连接的表现）时才接受 `OP_REQ_IMPORT`。本机其它程序不能再从另一个进程导入 persona。
 - **握手限制**：连接必须在 5 秒内完成导入握手；同时最多 16 个握手，超出且不是 host controller 打开的连接会在不创建线程的情况下关闭。
@@ -187,10 +187,12 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 - **释放**：被 Dispose 的设备会结束其打开的 import；handle 按 location 拆除并取消该 location 的 attempts；`Dispose` 会唤醒输入泵，而不再等满 500 ms 的帧等待；第二次 `Dispose` 直接返回。
 - **音频事件隔离**：control 与 stream 变化在专用 audio event thread 上按主机顺序触发，慢 handler 不会阻塞连接 reader 或音频泵；handler 抛出的异常会被丢弃，而不是结束连接或进程。
 - **GET_REPORT(Input)**：HID 描述符未声明的 report ID 返回 STALL，而不是最后一份报文。
+- **USB/IP 传输零分配**：命令 reader 自带接收缓冲，并复用 OUT 数据、等时描述符与包数组；输入泵在自己的缓冲里构建每一帧，队列中的帧在被读取应答或淘汰后归还缓冲池；Switch 与 GIP 帧就地构建；control 应答（描述符、状态、配置、接口、UAC 值、`GET_REPORT` 与 Sony feature stub）从设备自有缓冲或栈上发出，vendor 表的十六进制应答在构造时解码一次；audio URB 池化，包与 PCM 数组复用。
+- **submit 路径零分配**：`WriteInputFrame` 通过 section 指针写入、接受 span，seqlock 只用一个 write barrier 加一次 release store，`SetEvent` 门铃移出内联；`SubmitRawReport` 对没有固定字节的帧直接从调用方 span 写入；`SubmitState` 只在扩展 codec 与 XUSB GIP 块真正使用时才解析六个 simple slot，描述符路径由 `BuildReportInto` 自己读取轴值；`HidReportBuilder.WriteBits` 用一次掩码读改写写入任意 1–32 位字段，而不是逐位循环。
 
 另有一项 GKMD 自身的调整：server 监听自己的 `37286..37301`，避开 HIDMaestro 的 `18509..18524` / `28509..28524` 与 FlexInput 的 `18008`，两者可并存而不会互相接管对方的 import。该段用完后回退到 OS 分配的 loopback 端口。
 
-以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：零分配 control/frame 路径（仅性能）、owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略）、ARM64 载荷，以及 2.0 数据模型。
+以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略）、ARM64 载荷，以及 2.0 数据模型。
 
 #### 1.12.0 之后未同步的上游工作（1.12.0 → 2.0.3）
 

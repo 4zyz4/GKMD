@@ -10,7 +10,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 
 - Upstream project: https://github.com/hifihedgehog/HIDMaestro
 - Origin version: `v1.5.1`
-- **Latest upstream compared: `v2.0.3`** (2026-10-22), the current release. It has moved device behavior into JSON profiles with compiled programs, and ships identity keys, automatic transport installation, uninstall, VR and ARM64 payloads; it also changed the public API, so 1.x programs must migrate to 2.0.
+- **Latest upstream compared: `v2.0.3`** (2026-10-22), the baseline for the API and behavior comparison. It has moved device behavior into JSON profiles with compiled programs, and ships identity keys, automatic transport installation, uninstall, VR and ARM64 payloads; it also changed the public API, so 1.x programs must migrate to 2.0. The allocation-free submit-path lane from 2.1.0 is synced separately.
 - Upstream license: MIT License (see `LICENSE`; GKMD retains the original copyright notice)
 - Namespaces: `HIDMaestro` / `HIDMaestro.Internal` / `HIDMaestro.Internal.Usbip`
   → `GKMD` / `GKMD.Internal` / `GKMD.Internal.Usbip`
@@ -78,7 +78,7 @@ Only fixes that apply to the pure USB/IP design and that existed through 1.12.0 
 - **2.0.0**: devices-as-data report fields, feature answers, protocols and report programs; the `ProgramForm` compiler / interpreter; `deviceModelFrom` models; strict profile validation with JSON paths; `HMPort`; identity keys and leases; `HMBuildInfo`; NativeAOT support; ARM64 driver/transport payloads; the Wii U GameCube adapter; the PS Move and DualShock 3 data forms; the 337-profile catalog.
 - **2.0.1 – 2.0.3**: direct installation of usbip-win2's host controller files without running its installer, `HMUninstall` / `HIDMaestroUninstall.exe`, removal of the usbip-win2 host controller and root-hub filter, and the Valve persona corrections.
 
-The **USB/IP runtime** fixes from 2.0.0 *are* synced (host-controller-only imports, handshake limits, dead-server sweeps, location-based detach, disposal and audio-event hardening; see the sync list in section 7). What GKMD does not carry is the 2.0 data model, the identity/lease system, the 2.0.1–2.0.3 installer/uninstaller, and the perf-only allocation work.
+The **USB/IP runtime** fixes from 2.0.0 *are* synced (host-controller-only imports, handshake limits, dead-server sweeps, location-based detach, disposal and audio-event hardening; see the sync list in section 7), together with the 2.0.x zero-allocation frame, output, control and submit paths. What GKMD does not carry is the 2.0 data model, the identity/lease system, and the 2.0.1–2.0.3 installer/uninstaller.
 
 GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the code-defined static registry and the 1.x-derived controller API.
 
@@ -97,7 +97,7 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Resource logical names | `HIDMaestro.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
-| Version | `2.0.3` | `4.7.0.0` (follows GKME) |
+| Version | `2.0.3` | `4.7.1.0` (follows GKME) |
 | AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally; the host publishes with `PublishAot` |
 | ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Managed AnyCPU assembly; bundled usbip-win2 payload is x64-only |
 | Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
@@ -165,9 +165,9 @@ Only fixes that apply to the pure USB/IP design were taken:
 - **Stable per-controller serials** (`46054b8`, `a396741`): the USB serial varies by controller index, and profiles without a captured serial get a stable synthetic one. Windows keys the USB instance id on it instead of the vhci port.
 - **DualShock 4 reports** (`fd86c1a`): report `0x01` fields sit at SDL/Linux offsets, the sensor timestamp advances in 16/3 µs ticks, battery/full/cable and touch fields follow the real pad, `LT_DIGITAL` / `RT_DIGITAL` follow the 8-bit trigger value, and calibration is the identity (8192/g, 16/°/s) with the DS4 `0x05` ordering.
 
-#### Upstream USB/IP fixes synced (1.12.0 → 2.0.3)
+#### Upstream USB/IP fixes synced (1.12.0 → 2.1.0)
 
-These are the 2.0.0 changes that live entirely in the USB/IP transport and device layer, so they port without the 2.0 data model:
+These are the 2.0.x and 2.1.0 changes that live entirely in the USB/IP transport and device layer, so they port without the 2.0 data model:
 
 - **Host-controller-only imports** (`TcpConnectionOwner`): the server admits an `OP_REQ_IMPORT` only when the client end belongs to the System process (PID 4), which is how the kernel WSK connection appears. A local program can no longer import a persona from another process.
 - **Handshake limits**: a connection must finish its import handshake within 5 s, and at most 16 handshakes run at once; connections beyond that are closed without a thread unless the host controller opened them.
@@ -178,10 +178,12 @@ These are the 2.0.0 changes that live entirely in the USB/IP transport and devic
 - **Disposal**: a disposed device ends its open import, the handle detaches by location and cancels the location's attempts, `Dispose` wakes the input pump instead of waiting out its 500 ms frame wait, and a second `Dispose` returns.
 - **Audio event isolation**: control and stream changes are raised on a dedicated audio event thread in host order, so a slow handler cannot block the connection reader or the audio pump; an exception a handler throws is dropped instead of ending the connection or the process.
 - **GET_REPORT(Input)**: a report ID the HID descriptor does not declare is answered with a STALL instead of the last report.
+- **Allocation-free USB/IP transfers**: the command reader owns its receive buffer and reuses the arrays for a submit's OUT data, isochronous descriptors and packets; the input pump builds each frame in its own buffer and hands queued frames back to a pool once a read answers them or the queue drops them; Switch and GIP frames are built in place; control replies (descriptors, status, configuration, interface, UAC values, GET_REPORT and the Sony feature stubs) are sent from a device-owned buffer or the stack, with the vendor table's hex answers decoded once at construction; and audio URBs are pooled with their packet and PCM arrays reused.
+- **Allocation-free submit path**: `WriteInputFrame` stores through the section's pointer, takes spans, orders the seqlock with one write barrier plus a release store, and keeps the `SetEvent` doorbells out of line; `SubmitRawReport` writes a frame with no fixed bytes straight from the caller's span; `SubmitState` resolves the six simple slots only for the extended codec and the XUSB GIP block, leaving the descriptor path to read the axes itself; and `HidReportBuilder.WriteBits` writes any 1–32-bit field with one masked read-modify-write instead of one pass per bit.
 
 One GKMD-specific change accompanies these: the server listens on its own `37286..37301`, clear of HIDMaestro's `18509..18524` / `28509..28524` and FlexInput's `18008`, so the two can run side by side without either taking the other's imports. If the range is full, it falls back to an OS-assigned loopback port.
 
-Not synced from 2.0.x because they do not apply or are outside the USB/IP runtime: the zero-allocation control/frame paths (performance only), owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), ARM64 payloads, and the 2.0 data model.
+Not synced from 2.0.x because they do not apply or are outside the USB/IP runtime: owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), ARM64 payloads, and the 2.0 data model.
 
 #### Upstream work after 1.12.0 not synced (1.12.0 → 2.0.3)
 
