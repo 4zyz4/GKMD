@@ -35,7 +35,11 @@ internal sealed class GipResponder
     private const ushort ProductId = 0x02EA;
     private const ushort SeriesProductId = 0x0B12;
 
-    private readonly Action<byte, byte, byte[]> _publishOutput;
+    /// <summary>Publishes a host command to the output ring. The data is
+    /// valid for the duration of the call.</summary>
+    internal delegate void Publisher(byte source, byte reportId, ReadOnlySpan<byte> data);
+
+    private readonly Publisher _publishOutput;
 
     // True for the Xbox Series X|S persona: the metadata advertises the
     // console-function-map and dynamic-latency interfaces and the input report
@@ -65,7 +69,7 @@ internal sealed class GipResponder
     public bool Active => _active;
     public bool Guide => (_payload[0] & 0x01) != 0;
 
-    public GipResponder(Action<byte, byte, byte[]> publishOutput, int index, bool series = false)
+    public GipResponder(Publisher publishOutput, int index, bool series = false)
     {
         _publishOutput = publishOutput;
         _series = series;
@@ -169,6 +173,15 @@ internal sealed class GipResponder
     /// for a Series pad.</summary>
     public byte[] BuildInputFrame()
     {
+        Span<byte> frame = stackalloc byte[GipProtocol.PktMaxLength + 8];
+        int length = BuildInputFrame(frame);
+        return frame[..length].ToArray();
+    }
+
+    /// <summary>Builds one Gamepad Input Report (0x20) into
+    /// <paramref name="dst"/> and returns its length.</summary>
+    public int BuildInputFrame(Span<byte> dst)
+    {
         int size = _series ? SeriesInputSize : XboxOnePayloadSize;
         Span<byte> p = stackalloc byte[SeriesInputSize];
         _payload.CopyTo(p);
@@ -180,7 +193,7 @@ internal sealed class GipResponder
             // the host; the rest stays zero.
             p[XboxOnePayloadSize] = _share ? (byte)0x01 : (byte)0x00;
         }
-        return GipProtocol.EncodeFrame(GipProtocol.CmdInput, 0x00, NextInputSeq(), p.Slice(0, size));
+        return GipProtocol.EncodeFrameInto(dst, GipProtocol.CmdInput, 0x00, NextInputSeq(), p[..size]);
     }
 
     public void Reset()
@@ -252,7 +265,7 @@ internal sealed class GipResponder
             }
 
             case GipProtocol.CmdRumble: // 0x09, downstream
-                _publishOutput(UsbipEmulatedDevice.SourceHidOutput, GipProtocol.CmdRumble, payload.ToArray());
+                _publishOutput(UsbipEmulatedDevice.SourceHidOutput, GipProtocol.CmdRumble, payload);
                 break;
 
             case GipProtocol.CmdSerialNumber: // 0x1E Get Serial Number

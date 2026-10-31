@@ -348,36 +348,48 @@ public sealed class GKController : IDisposable
         long startTicks = OnSubmitLatencyMicros != null
             ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
-        // v1.3.9 — single unified state.Axes dict drives every analog input.
-        // Resolve the 6 "simple-slot" values (left stick X/Y, right stick
-        // X/Y, LT, RT) by looking up each profile's declared sticks/triggers
-        // in the axes dict. Auto-default: 0.5 (centered) for sticks, 0.0
-        // (released) for triggers.
+        // The six simple-slot values feed only two paths: the extended
+        // vendor-blob codec and the XUSB GIP block. The descriptor path reads
+        // the axes itself inside BuildReportInto, so a plain HID frame does
+        // not pay for lookups whose results nothing uses.
         var axes = state.Axes;
-        double GetAxis(GKAxis ax, double def) =>
-            axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
+        bool useExtended = Profile.ExtendedReport != null
+                        && _extendedReportBuffer != null
+                        && _extEncoderState != null
+                        && _extendedModeArmed;
+        double mlx = 0.5, mly = 0.5, mrx = 0.5, mry = 0.5, mlt = 0, mrt = 0;
+        if (useExtended || _packsGipBuffer)
+        {
+            // v1.3.9 — single unified state.Axes dict drives every analog
+            // input. Resolve the 6 "simple-slot" values (left stick X/Y,
+            // right stick X/Y, LT, RT) by looking up each profile's declared
+            // sticks/triggers in the axes dict. Auto-default: 0.5 (centered)
+            // for sticks, 0.0 (released) for triggers.
+            double GetAxis(GKAxis ax, double def) =>
+                axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
 
-        // Cached at construction: Profile.Sticks / Profile.Triggers are
-        // uncached computed properties that each allocate a List plus
-        // record elements on every access. Reading them per SubmitState
-        // frame (~250 Hz × N controllers) is ~6 heap objects/frame of
-        // avoidable GC pressure on the hot path (audit 1n). The layout is
-        // immutable for the controller's lifetime, so resolve once.
-        var sticks = _cachedSticks;
-        var triggers = _cachedTriggers;
-        double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : 0.5;
-        double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : 0.5;
-        double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5) : 0.5;
-        double mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5) : 0.5;
-        // Triggers resolve canonical-first, then fall back to the descriptor's
-        // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
-        // ResolveAxisByRole (canonical defaults when no axisMap); GKMDTest
-        // / StandardAxes writes axes[triggers[N].Axis] directly. Both must feed
-        // the GIP buffer that drives XInput / WGI / RawInput; otherwise the
-        // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
-        // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
-        double mlt = ResolveTrigger(axes, triggers, 0, _canonicalLt);
-        double mrt = ResolveTrigger(axes, triggers, 1, _canonicalRt);
+            // Cached at construction: Profile.Sticks / Profile.Triggers are
+            // uncached computed properties that each allocate a List plus
+            // record elements on every access. Reading them per SubmitState
+            // frame (~250 Hz × N controllers) is ~6 heap objects/frame of
+            // avoidable GC pressure on the hot path (audit 1n). The layout is
+            // immutable for the controller's lifetime, so resolve once.
+            var sticks = _cachedSticks;
+            var triggers = _cachedTriggers;
+            mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : 0.5;
+            mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : 0.5;
+            mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5) : 0.5;
+            mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5) : 0.5;
+            // Triggers resolve canonical-first, then fall back to the descriptor's
+            // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
+            // ResolveAxisByRole (canonical defaults when no axisMap); GKMDTest
+            // / StandardAxes writes axes[triggers[N].Axis] directly. Both must feed
+            // the GIP buffer that drives XInput / WGI / RawInput; otherwise the
+            // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
+            // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
+            mlt = ResolveTrigger(axes, triggers, 0, _canonicalLt);
+            mrt = ResolveTrigger(axes, triggers, 1, _canonicalRt);
+        }
 
         byte[] report;
         // v1.3.5 — vendor-blob path is gated on the host-side arm flag.
@@ -407,11 +419,6 @@ public sealed class GKController : IDisposable
         // that joy.cpl, dinput, and the test app's parsers all decode
         // correctly). Restoring the v1.3.4 path for USB removes the
         // regression.
-        bool useExtended = Profile.ExtendedReport != null
-                        && _extendedReportBuffer != null
-                        && _extEncoderState != null
-                        && _extendedModeArmed;
-
         if (useExtended)
         {
             // Profile.ExtendedReport's field list drives byte placement.
@@ -588,16 +595,29 @@ public sealed class GKController : IDisposable
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
-        if (report.Length > SharedMemoryIO.DATA_CAPACITY)
-            throw new ArgumentException(
-                $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
-                nameof(report));
+        if (report.Length == 0) ThrowReportLength(report.Length, tooLong: false);
 
         // v1.3.0 — copy into the per-controller reusable buffer instead of
         // report.ToArray()'ing per call. Vendor-protocol consumers (PadForge
         // DualSense path, etc.) hit this path at the same rate as
         // SubmitState; the alloc-per-call cost was visible.
+        //
+        // A frame with no fixed bytes to overlay goes into the section from
+        // the caller's own span, in the one copy the section takes.
+        var rawDefaults = Profile.Inner.InputDefaults;
+        if (rawDefaults == null)
+        {
+            if (report.Length > SharedMemoryIO.DATA_CAPACITY)
+                ThrowReportLength(report.Length, tooLong: true);
+            SharedMemoryIO.WriteInputFrame(
+                _inputView, _inputEvent, ref _inputSeqNo, report, report.Length,
+                _packsGipBuffer ? _gipBuf : null,
+                companionEvent: _companionInputEvent);
+            return;
+        }
+
+        if (report.Length > SharedMemoryIO.DATA_CAPACITY)
+            ThrowReportLength(report.Length, tooLong: true);
         report.CopyTo(_rawReportBuffer.AsSpan());
 
         // v1.3.5 — overlay profile-declared fixed bytes. Note that
@@ -609,8 +629,6 @@ public sealed class GKController : IDisposable
         // status bytes (activeProfile at struct[48]); without overlaying
         // here, SubmitRawReport clobbers whatever SubmitState wrote a few
         // microseconds earlier.
-        var rawDefaults = Profile.Inner.InputDefaults;
-        if (rawDefaults != null)
         {
             int len = Math.Min(report.Length, _rawReportBuffer.Length);
             int dataShift = 0;
@@ -880,6 +898,19 @@ public sealed class GKController : IDisposable
     private void ThrowIfDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(GKController));
+    }
+
+    /// <summary>The raw-report length exceptions, out of line so
+    /// SubmitRawReport's own frame stays small on every frame it accepts.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ThrowReportLength(int length, bool tooLong)
+    {
+        if (tooLong)
+            throw new ArgumentException(
+                $"Report length {length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
+                "report");
+        throw new ArgumentException("Report cannot be empty.", "report");
     }
 
     /// <summary>Removes the virtual device from PnP and frees the per-controller

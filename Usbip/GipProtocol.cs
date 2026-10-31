@@ -55,26 +55,48 @@ internal static class GipProtocol
     public static byte[] EncodeFrame(byte command, byte options, byte sequence,
                                      ReadOnlySpan<byte> payload)
     {
-        Span<byte> lenBytes = stackalloc byte[5];
-        int lenLen = EncodeVarint((uint)payload.Length, lenBytes);
+        int headerLen = HeaderLength(payload.Length);
+        var buf = new byte[headerLen + payload.Length];
+        EncodeFrameInto(buf, command, options, sequence, payload);
+        return buf;
+    }
+
+    /// <summary>Encodes one GIP frame into <paramref name="dst"/> and returns
+    /// its length, so a frame that goes out every poll allocates nothing.</summary>
+    public static int EncodeFrameInto(Span<byte> dst, byte command, byte options, byte sequence,
+                                      ReadOnlySpan<byte> payload)
+    {
+        int lenLen = VarintLength((uint)payload.Length);
         int headerLen = 3 + lenLen;
         bool pad = (headerLen & 1) != 0;
 
-        var buf = new byte[headerLen + (pad ? 1 : 0) + payload.Length];
-        buf[0] = command;
-        buf[1] = options;
-        buf[2] = sequence;
-        lenBytes.Slice(0, lenLen).CopyTo(buf.AsSpan(3));
+        dst[0] = command;
+        dst[1] = options;
+        dst[2] = sequence;
+        EncodeVarint((uint)payload.Length, dst.Slice(3, lenLen));
 
         int p = headerLen;
         if (pad)
         {
-            buf[p - 1] |= 0x80;
-            buf[p] = 0x00;
+            dst[p - 1] |= 0x80;
+            dst[p] = 0x00;
             p++;
         }
-        payload.CopyTo(buf.AsSpan(p));
-        return buf;
+        payload.CopyTo(dst[p..]);
+        return p + payload.Length;
+    }
+
+    private static int HeaderLength(int payloadLength)
+    {
+        int headerLen = 3 + VarintLength((uint)payloadLength);
+        return headerLen + ((headerLen & 1) != 0 ? 1 : 0);
+    }
+
+    private static int VarintLength(uint value)
+    {
+        int n = 1;
+        while ((value >>= 7) != 0) n++;
+        return n;
     }
 
     /// <summary>Encodes a message, chunking it when the payload exceeds

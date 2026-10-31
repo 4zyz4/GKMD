@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -63,7 +64,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// interfaces and the shared payload is 15 bytes (14-byte body + Share).</summary>
     private readonly bool _gipSeries;
     private GipResponder? _gip;
-    private readonly Queue<byte[]> _gipReplies = new();          // 0x02/0x03/0x04/0x07/0x01 replies, served before stream frames
+    private readonly Queue<QueuedFrame> _gipReplies = new();     // 0x02/0x03/0x04/0x07/0x01 replies, served before stream frames
     private uint _lastGipSharedSeqNo;
     private int _gipSendErrCount;
     /// <summary>The one interrupt-IN endpoint the input pump answers (the
@@ -75,6 +76,9 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private readonly byte _switchDeviceType;
     private readonly int _rawInputSize;
     private readonly GKMD.Internal.VendorControlRequest[]? _vendorRequests;
+    // The vendor table's answers, decoded once at construction: a GET on
+    // them happens at every enumeration.
+    private readonly byte[]?[]? _vendorResponses;
     // HID Enhanced Wheel Support: non-zero when the profile declares a
     // Resolution Multiplier feature (high-resolution mouse). The feature
     // report is report 0; GET_REPORT(Feature, 0) returns the current value
@@ -100,14 +104,35 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private UsbipServer.Connection? _connection;
 
     private readonly object _hidLock = new();
-    private readonly Queue<byte[]> _frameQueue = new();          // built wire reports awaiting a read
+    private readonly Queue<QueuedFrame> _frameQueue = new();     // built wire reports awaiting a read
+    private readonly Stack<byte[]> _spareFrames = new();         // buffers a dropped or answered frame gives back
     private readonly Queue<uint> _pendingInterruptIn = new();    // seqnums of parked interrupt IN URBs
     private byte[] _lastInputReport;
+    private int _lastInputReportLength;
     private uint _lastSharedSeqNo;
+
+    // The input pump's own report, so a frame it takes allocates nothing.
+    private readonly int _reportCapacity;
+    private readonly byte[] _pumpReport;
+
+    // The connection reader's control reply, so a GET_REPORT or a feature
+    // stub is answered from a buffer the device keeps. Control transfers
+    // are answered on the connection's single reader thread.
+    private readonly byte[] _controlReply;
+
+    /// <summary>One report waiting for a read: its buffer and the bytes it
+    /// uses. The buffer goes back to <see cref="_spareFrames"/> once a read
+    /// is answered or the queue drops it.</summary>
+    private readonly struct QueuedFrame
+    {
+        public readonly byte[] Buffer;
+        public readonly int Length;
+        public QueuedFrame(byte[] buffer, int length) { Buffer = buffer; Length = length; }
+    }
 
     // 鈹€鈹€ Switch Pro protocol responder state (VID 057E PID 2009) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     private readonly object _switchLock = new();
-    private readonly Queue<byte[]> _switchReplies = new();       // 0x81/0x21 replies, served before stream frames
+    private readonly Queue<QueuedFrame> _switchReplies = new();  // 0x81/0x21 replies, served before stream frames
     private readonly byte[] _switchBody = new byte[48];          // latest consumer-packed 0x30 body
     private volatile bool _switchImuEnabled;
     private int _switchTimerCounter;
@@ -157,15 +182,30 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             ? _builder.InputReportByteSize
             : (profile.InputReportSize ?? 64);
         _vendorRequests = profile.UsbConfiguration?.VendorRequests?.ToArray();
+        if (_vendorRequests != null)
+        {
+            _vendorResponses = new byte[_vendorRequests.Length][];
+            for (int i = 0; i < _vendorRequests.Length; i++)
+            {
+                string? hex = _vendorRequests[i].Response;
+                if (!string.IsNullOrEmpty(hex))
+                    _vendorResponses[i] = Convert.FromHexString(hex.Replace(" ", "").Replace("-", ""));
+            }
+        }
         _resolutionMultiplier = profile.UsbConfiguration?.ResolutionMultiplier ?? 0;
         // Enumerating as high-resolution (logical 1 = physical max 120) avoids
         // depending on a host-side SET before the first scroll. A host that
         // writes the feature overwrites this.
         _resolutionMultiplierValue = _resolutionMultiplier > 0 ? (byte)1 : (byte)0;
-        _lastInputReport = new byte[Math.Max(1, _rawInputSize)];
+        _reportCapacity = Math.Max(Math.Max(_rawInputSize, 64), SharedMemoryIO.EXTENDED_DATA_CAPACITY);
+        _pumpReport = new byte[_reportCapacity];
+        _controlReply = new byte[Math.Max(_reportCapacity, ResponseBufferMaxLength)];
+        _lastInputReport = new byte[_reportCapacity];
+        _lastInputReportLength = Math.Max(1, _rawInputSize);
         if (_builder != null && _builder.InputReportId != 0) _lastInputReport[0] = _builder.InputReportId;
         if (_switchProtocol)
         {
+            _lastInputReportLength = 64;
             _lastInputReport[0] = 0x30;
             // Neutral 12-bit sticks: 0x800 packed little-nibble = 00 08 80.
             _switchBody[5] = 0x00; _switchBody[6] = 0x08; _switchBody[7] = 0x80;
@@ -234,9 +274,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         lock (_hidLock)
         {
             _pendingInterruptIn.Clear();
-            _frameQueue.Clear();
-            _switchReplies.Clear();
-            _gipReplies.Clear();
+            ClearQueuesLocked();
         }
         if (_switchProtocol)
         {
@@ -275,24 +313,32 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     Thread.Sleep(4);
                 if (_stop) break;
 
-                if (!TryReadInputFrame(out var report)) continue;
+                int length;
+                if (!TryReadInputFrame(_pumpReport, out length)) continue;
+                var report = new ReadOnlySpan<byte>(_pumpReport, 0, length);
 
-                uint seq;
+                uint seq = 0;
+                bool have = false;
                 lock (_hidLock)
                 {
-                    _lastInputReport = report;
+                    report.CopyTo(_lastInputReport);
+                    _lastInputReportLength = length;
                     if (_pendingInterruptIn.Count > 0)
                     {
                         seq = _pendingInterruptIn.Dequeue();
+                        have = true;
                     }
                     else
                     {
-                        if (_frameQueue.Count >= MaxFrameQueue) _frameQueue.Dequeue();
-                        _frameQueue.Enqueue(report);
-                        continue;
+                        // No read parked. The frame takes a buffer from the
+                        // pool, or the buffer of the oldest frame a full
+                        // queue drops.
+                        byte[] buffer = TakeFrameBufferLocked();
+                        report.CopyTo(buffer);
+                        _frameQueue.Enqueue(new QueuedFrame(buffer, length));
                     }
                 }
-                SendInterruptInReply(seq, report);
+                if (have) SendInterruptInReply(seq, report);
             }
             catch
             {
@@ -303,73 +349,113 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         }
     }
 
+    /// <summary>Caller holds <see cref="_hidLock"/>: a buffer for a frame
+    /// the pump keeps, taking the end of a full queue or a spent one.</summary>
+    private byte[] TakeFrameBufferLocked()
+    {
+        if (_frameQueue.Count >= MaxFrameQueue) RecycleFrameLocked(_frameQueue.Dequeue().Buffer);
+        while (_spareFrames.Count > 0)
+        {
+            byte[] buffer = _spareFrames.Pop();
+            if (buffer.Length >= _reportCapacity) return buffer;
+        }
+        return new byte[_reportCapacity];
+    }
+
+    /// <summary>A frame buffer the device owns, taken under the lock the
+    /// queue and pool share.</summary>
+    private byte[] RentFrameBuffer()
+    {
+        lock (_hidLock) return TakeFrameBufferLocked();
+    }
+
+    /// <summary>Caller holds <see cref="_hidLock"/>.</summary>
+    private void RecycleFrameLocked(byte[] buffer)
+    {
+        if (buffer.Length >= _reportCapacity && _spareFrames.Count < MaxFrameQueue + 2)
+            _spareFrames.Push(buffer);
+    }
+
+    /// <summary>Caller holds <see cref="_hidLock"/>: drop every queued
+    /// report and keep its buffer.</summary>
+    private void ClearQueuesLocked()
+    {
+        while (_frameQueue.Count > 0) RecycleFrameLocked(_frameQueue.Dequeue().Buffer);
+        while (_switchReplies.Count > 0) RecycleFrameLocked(_switchReplies.Dequeue().Buffer);
+        while (_gipReplies.Count > 0) RecycleFrameLocked(_gipReplies.Dequeue().Buffer);
+    }
+
     /// <summary>Seqlock read of the shared input section plus the wire
     /// report build, mirroring driver.c ReadSharedInput + the report
-    /// assembly in its worker (driver.c:1240-1296).</summary>
-    private bool TryReadInputFrame(out byte[] report)
+    /// assembly in its worker (driver.c:1240-1296). The report goes into
+    /// <paramref name="report"/> and nothing is allocated. Between the two
+    /// reads of the sequence number only the bytes the report takes are
+    /// copied: the two sizes, then the extended report or the data.</summary>
+    private unsafe bool TryReadInputFrame(Span<byte> report, out int length)
     {
-        report = Array.Empty<byte>();
+        length = 0;
         IntPtr view = _inputView;
         if (view == IntPtr.Zero) return false;
+        byte* v = (byte*)view;
 
-        Span<byte> snap = stackalloc byte[SharedMemoryIO.SHARED_INPUT_SIZE];
+        bool hasHid = _builder != null;
+        int expectedSize = hasHid && _builder!.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
+        bool hasReportId = hasHid && _builder!.InputReportId != 0;
+        int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
+        if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
+
         uint seq1, seq2;
         int retries = 4;
         do
         {
-            seq1 = (uint)Marshal.ReadInt32(view, 0);
+            seq1 = Volatile.Read(ref *(uint*)v);
             Thread.MemoryBarrier();
-            unsafe
+
+            int extSize = Unsafe.ReadUnaligned<int>(v + SharedMemoryIO.EXTENDED_SIZE_OFFSET);
+            if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
             {
-                fixed (byte* dst = snap)
-                    Buffer.MemoryCopy((void*)view, dst, snap.Length, snap.Length);
+                new ReadOnlySpan<byte>(v + SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
+                length = extSize;
             }
+            else if (!hasHid)
+            {
+                // Vendor-class (non-HID) interfaces carry an opaque raw input
+                // report with no Report ID. Transmit exactly _rawInputSize
+                // bytes from the DATA section verbatim (e.g. the 20-byte
+                // Xbox 360 wired report).
+                int size = Math.Min(_rawInputSize, SharedMemoryIO.DATA_CAPACITY);
+                new ReadOnlySpan<byte>(v + SharedMemoryIO.DATA_OFFSET, size).CopyTo(report);
+                length = size;
+            }
+            else
+            {
+                int dataLen = Unsafe.ReadUnaligned<int>(v + 4);
+                if (dataLen > maxData) dataLen = maxData;
+                if (dataLen > SharedMemoryIO.DATA_CAPACITY) dataLen = SharedMemoryIO.DATA_CAPACITY;
+                if (dataLen < 0) dataLen = 0;
+
+                // The report is expectedSize bytes, zero past the data.
+                var r = report[..expectedSize];
+                r.Clear();
+                var data = new ReadOnlySpan<byte>(v + SharedMemoryIO.DATA_OFFSET, dataLen);
+                if (hasReportId)
+                {
+                    r[0] = _builder!.InputReportId;
+                    data[..Math.Min(dataLen, expectedSize - 1)].CopyTo(r[1..]);
+                }
+                else
+                {
+                    data.CopyTo(r);
+                }
+                length = expectedSize;
+            }
+
             Thread.MemoryBarrier();
-            seq2 = (uint)Marshal.ReadInt32(view, 0);
+            seq2 = Volatile.Read(ref *(uint*)v);
         } while ((seq1 != seq2 || (seq1 & 1) != 0) && --retries > 0);
-        if (seq1 != seq2 || (seq1 & 1) != 0) return false;
-        if (seq1 == _lastSharedSeqNo) return false; // no new frame
+        if (seq1 != seq2 || (seq1 & 1) != 0) { length = 0; return false; }
+        if (seq1 == _lastSharedSeqNo) { length = 0; return false; } // no new frame
         _lastSharedSeqNo = seq1;
-
-        int extSize = BitConverter.ToInt32(snap[SharedMemoryIO.EXTENDED_SIZE_OFFSET..]);
-        if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
-        {
-            report = snap.Slice(SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).ToArray();
-            return true;
-        }
-
-        // Vendor-class (non-HID) interfaces carry an opaque raw input report
-        // with no Report ID. Transmit exactly _rawInputSize bytes from the
-        // DATA section verbatim (e.g. the 20-byte Xbox 360 wired report).
-        if (!_hasHid)
-        {
-            int size = Math.Min(_rawInputSize, SharedMemoryIO.DATA_CAPACITY);
-            var rv = new byte[size];
-            snap.Slice(SharedMemoryIO.DATA_OFFSET, size).CopyTo(rv);
-            report = rv;
-            return true;
-        }
-
-        int expectedSize = _builder!.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
-        int dataLen = BitConverter.ToInt32(snap[4..]);
-        bool hasReportId = _builder.InputReportId != 0;
-        int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
-        if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
-        if (dataLen > maxData) dataLen = maxData;
-        if (dataLen > SharedMemoryIO.DATA_CAPACITY) dataLen = SharedMemoryIO.DATA_CAPACITY;
-        if (dataLen < 0) dataLen = 0;
-
-        var r = new byte[expectedSize];
-        if (hasReportId)
-        {
-            r[0] = _builder.InputReportId;
-            snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r.AsSpan(1));
-        }
-        else
-        {
-            snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r);
-        }
-        report = r;
         return true;
     }
 
@@ -394,6 +480,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         long lastStatus = 0;
         long lastInputSend = 0;
         bool loggedActive = false;
+        Span<byte> body = stackalloc byte[15];
 
         while (!_stop)
         {
@@ -416,7 +503,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 }
 
                 bool changed = false;
-                if (TryReadGipPayload(out var body))
+                if (TryReadGipPayload(body))
                     changed = _gip.UpdatePayload(body);
 
                 if (_gip.Active && !loggedActive)
@@ -434,7 +521,9 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     // plus a slow keep-alive so a parked URB is still serviced.
                     if (changed || now - lastInputSend >= 250)
                     {
-                        SendGipFrame(_gip.BuildInputFrame(), control: false);
+                        byte[] frame = RentFrameBuffer();
+                        int length = _gip.BuildInputFrame(frame);
+                        SendGipFrame(frame, length, control: false);
                         lastInputSend = now;
                     }
 
@@ -456,9 +545,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// <summary>Seqlock read of the GIP input payload from the shared DATA
     /// section: 14 bytes for the Xbox One, 15 for the Series (body + Share).
     /// Keeps the last body when no new frame has arrived.</summary>
-    private bool TryReadGipPayload(out byte[] body)
+    private bool TryReadGipPayload(Span<byte> body)
     {
-        body = Array.Empty<byte>();
         IntPtr view = _inputView;
         if (view == IntPtr.Zero) return false;
 
@@ -487,9 +575,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         int cap = _gipSeries ? 15 : 14;
         if (dataLen > cap) dataLen = cap;
         if (dataLen <= 0) return false;
-        var b = new byte[cap];
-        snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(b);
-        body = b;
+        snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(body);
+        body[dataLen..cap].Clear();
         return true;
     }
 
@@ -497,8 +584,11 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// immediately, or queues it. Control replies (announce/identify/status/
     /// guide/ack) preempt stream frames in <see cref="_gipReplies"/>.</summary>
     private void SendGipFrame(byte[] frame, bool control)
+        => SendGipFrame(frame, frame.Length, control);
+
+    private void SendGipFrame(byte[] frame, int length, bool control)
     {
-        uint seq;
+        uint seq = 0;
         bool have = false;
         lock (_hidLock)
         {
@@ -510,12 +600,15 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             else
             {
                 var q = control ? _gipReplies : _frameQueue;
-                if (q.Count >= MaxFrameQueue) q.Dequeue();
-                q.Enqueue(frame);
-                seq = 0;
+                if (q.Count >= MaxFrameQueue) RecycleFrameLocked(q.Dequeue().Buffer);
+                q.Enqueue(new QueuedFrame(frame, length));
             }
         }
-        if (have) SendInterruptInReply(seq, frame);
+        if (have)
+        {
+            SendInterruptInReply(seq, new ReadOnlySpan<byte>(frame, 0, length));
+            lock (_hidLock) RecycleFrameLocked(frame);
+        }
     }
 
     private void HandleGipOutput(ReadOnlySpan<byte> payload)
@@ -536,6 +629,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     private const byte SwitchBatteryConn = 0x91; // full + charging, wired
     private const byte SwitchVibrator = 0xB0;
+    private const int SwitchFrameSize = 64;
 
     private void SwitchPumpLoop()
     {
@@ -551,12 +645,15 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
                 TryReadSwitchBody();
 
-                var frame = BuildSwitchFrame();
-                uint seq;
+                byte[] frame;
+                lock (_hidLock) frame = TakeFrameBufferLocked();
+                BuildSwitchFrame(frame);
+                uint seq = 0;
                 bool have = false;
                 lock (_hidLock)
                 {
-                    _lastInputReport = frame;
+                    _lastInputReportLength = SwitchFrameSize;
+                    frame.AsSpan(0, SwitchFrameSize).CopyTo(_lastInputReport);
                     if (_pendingInterruptIn.Count > 0)
                     {
                         seq = _pendingInterruptIn.Dequeue();
@@ -564,12 +661,14 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     }
                     else
                     {
-                        if (_frameQueue.Count >= MaxFrameQueue) _frameQueue.Dequeue();
-                        _frameQueue.Enqueue(frame);
-                        seq = 0;
+                        _frameQueue.Enqueue(new QueuedFrame(frame, SwitchFrameSize));
                     }
                 }
-                if (have) SendInterruptInReply(seq, frame);
+                if (have)
+                {
+                    SendInterruptInReply(seq, new ReadOnlySpan<byte>(frame, 0, SwitchFrameSize));
+                    lock (_hidLock) RecycleFrameLocked(frame);
+                }
             }
             catch
             {
@@ -613,43 +712,32 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(_switchBody);
     }
 
-    /// <summary>Copy the latest buttons/sticks + (when enabled) IMU out of the
-    /// consumer body into the 46-byte state layout the 0x30/0x21 frames embed
-    /// ([0..9) buttons+sticks, [10..46) IMU x3).</summary>
-    private void FillSwitchState(Span<byte> state)
-    {
-        state.Clear();
-        lock (_switchLock)
-        {
-            _switchBody.AsSpan(2, 9).CopyTo(state);
-            if (_switchImuEnabled) _switchBody.AsSpan(12, 36).CopyTo(state.Slice(10, 36));
-        }
-    }
-
     /// <summary>Build one 64-byte report-0x30 full-mode frame from the latest
     /// body, with the timer/battery/vibrator bytes overlaid (driver.c
-    /// SwitchStreamProc).</summary>
-    private byte[] BuildSwitchFrame()
+    /// SwitchStreamProc), into a buffer the caller owns.</summary>
+    private void BuildSwitchFrame(byte[] frame)
     {
-        var state = new byte[46];
-        FillSwitchState(state);
-
-        var frame = new byte[64];
-        frame[0] = 0x30;
-        frame[1] = (byte)Interlocked.Increment(ref _switchTimerCounter);
-        frame[2] = SwitchBatteryConn;
-        state.AsSpan(0, 9).CopyTo(frame.AsSpan(3));
-        frame[12] = SwitchVibrator;
-        state.AsSpan(10, 36).CopyTo(frame.AsSpan(13));
-        return frame;
+        const int size = SwitchFrameSize;
+        var f = frame.AsSpan(0, size);
+        f.Clear();
+        f[0] = 0x30;
+        f[1] = (byte)Interlocked.Increment(ref _switchTimerCounter);
+        f[2] = SwitchBatteryConn;
+        lock (_switchLock)
+        {
+            _switchBody.AsSpan(2, 9).CopyTo(f[3..12]);
+            if (_switchImuEnabled) _switchBody.AsSpan(12, 36).CopyTo(f[13..49]);
+        }
+        f[12] = SwitchVibrator;
     }
 
     /// <summary>Queue a synthesized reply frame (0x81/0x21). Completes a parked
     /// interrupt IN immediately when one exists; otherwise parks it ahead of
-    /// the stream frames in <see cref="_switchReplies"/>.</summary>
-    private void SwitchQueueReply(byte[] reply)
+    /// the stream frames in <see cref="_switchReplies"/>. Takes ownership of
+    /// <paramref name="reply"/> and returns it to the pool once sent.</summary>
+    private void SwitchQueueReply(byte[] reply, int length)
     {
-        uint seq;
+        uint seq = 0;
         bool have = false;
         lock (_hidLock)
         {
@@ -660,12 +748,16 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             }
             else
             {
-                if (_switchReplies.Count >= MaxFrameQueue) _switchReplies.Dequeue();
-                _switchReplies.Enqueue(reply);
-                seq = 0;
+                if (_switchReplies.Count >= MaxFrameQueue)
+                    RecycleFrameLocked(_switchReplies.Dequeue().Buffer);
+                _switchReplies.Enqueue(new QueuedFrame(reply, length));
             }
         }
-        if (have) SendInterruptInReply(seq, reply);
+        if (have)
+        {
+            SendInterruptInReply(seq, new ReadOnlySpan<byte>(reply, 0, length));
+            lock (_hidLock) RecycleFrameLocked(reply);
+        }
     }
 
     /// <summary>Output report 0x80 USB init commands (dekuNukem USB-HID-Notes):
@@ -674,25 +766,28 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private void SwitchHandleProprietary(ReadOnlySpan<byte> payload)
     {
         byte cmd = payload.Length > 0 ? payload[0] : (byte)0;
-
-        var reply = new byte[64];
-        reply[0] = 0x81;
-        reply[1] = cmd;
         switch (cmd)
         {
             case 0x01: // Status: 81 01 00 <type> <MAC reversed>
-                reply[2] = 0x00;
-                reply[3] = _switchDeviceType;
-                for (int i = 0; i < 6; i++) reply[4 + i] = SwitchMac(5 - i);
-                SwitchQueueReply(reply);
-                break;
             case 0x02: // Handshake ack (load-bearing for BTrySetupUSB)
             case 0x03: // Baud-switch / high-speed ack
-                SwitchQueueReply(reply);
                 break;
             default:   // ForceUSB / ClearUSB / ResetMCU have no defined reply
-                break;
+                return;
         }
+
+        var reply = RentFrameBuffer();
+        var r = reply.AsSpan(0, SwitchFrameSize);
+        r.Clear();
+        r[0] = 0x81;
+        r[1] = cmd;
+        if (cmd == 0x01)
+        {
+            r[2] = 0x00;
+            r[3] = _switchDeviceType;
+            for (int i = 0; i < 6; i++) r[4 + i] = SwitchMac(5 - i);
+        }
+        SwitchQueueReply(reply, SwitchFrameSize);
     }
 
     /// <summary>Output report 0x01 rumble + subcommand -> input report 0x21.
@@ -705,29 +800,32 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         byte subcmd = payload[9];
         var args = payload[10..];
 
-        var state = new byte[46];
-        FillSwitchState(state);
-
-        var reply = new byte[64];
-        reply[0] = 0x21;
-        reply[1] = (byte)Interlocked.Increment(ref _switchTimerCounter);
-        reply[2] = SwitchBatteryConn;
-        state.AsSpan(0, 9).CopyTo(reply.AsSpan(3));
-        reply[12] = SwitchVibrator;
-        reply[13] = 0x80; // generic ACK default
-        reply[14] = subcmd;
+        var reply = RentFrameBuffer();
+        var r = reply.AsSpan(0, SwitchFrameSize);
+        r.Clear();
+        r[0] = 0x21;
+        r[1] = (byte)Interlocked.Increment(ref _switchTimerCounter);
+        r[2] = SwitchBatteryConn;
+        lock (_switchLock)
+        {
+            _switchBody.AsSpan(2, 9).CopyTo(r[3..12]);
+            if (_switchImuEnabled) _switchBody.AsSpan(12, 36).CopyTo(r[13..49]);
+        }
+        r[12] = SwitchVibrator;
+        r[13] = 0x80; // generic ACK default
+        r[14] = subcmd;
 
         switch (subcmd)
         {
             case 0x02: // Request device info
-                reply[13] = 0x82;
-                reply[15] = 0x03; // firmware 03.8B
-                reply[16] = 0x8B;
-                reply[17] = _switchDeviceType; // 1=L, 2=R, 3=Pro
-                reply[18] = 0x02;
-                for (int i = 0; i < 6; i++) reply[19 + i] = SwitchMac(i);
-                reply[25] = 0x01;
-                reply[26] = 0x01; // colors live in SPI
+                r[13] = 0x82;
+                r[15] = 0x03; // firmware 03.8B
+                r[16] = 0x8B;
+                r[17] = _switchDeviceType; // 1=L, 2=R, 3=Pro
+                r[18] = 0x02;
+                for (int i = 0; i < 6; i++) r[19 + i] = SwitchMac(i);
+                r[25] = 0x01;
+                r[26] = 0x01; // colors live in SPI
                 break;
 
             case 0x03: // Set input report mode
@@ -741,7 +839,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 break;
 
             case 0x04: // Trigger buttons elapsed time
-                reply[13] = 0x83;
+                r[13] = 0x83;
                 break;
 
             case 0x10: // SPI flash read: echo address+length, serve the image
@@ -749,17 +847,17 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 uint addr = (uint)(args[0] | (args[1] << 8) | (args[2] << 16) | (args[3] << 24));
                 int len = args[4];
                 if (len > 0x1D) len = 0x1D;
-                reply[13] = 0x90;
-                args.Slice(0, 5).CopyTo(reply.AsSpan(15));
-                for (int i = 0; i < len; i++) reply[20 + i] = SwitchSpiByte(addr + (uint)i);
+                r[13] = 0x90;
+                args.Slice(0, 5).CopyTo(r[15..]);
+                for (int i = 0; i < len; i++) r[20 + i] = SwitchSpiByte(addr + (uint)i);
                 break;
 
             case 0x21: // Set NFC/IR MCU config
-                reply[13] = 0xA0;
-                reply[15] = 0x01; reply[16] = 0x00; reply[17] = 0xFF;
-                reply[18] = 0x00; reply[19] = 0x08; reply[20] = 0x00;
-                reply[21] = 0x1B; reply[22] = 0x01;
-                reply[48] = 0xC8;
+                r[13] = 0xA0;
+                r[15] = 0x01; r[16] = 0x00; r[17] = 0xFF;
+                r[18] = 0x00; r[19] = 0x08; r[20] = 0x00;
+                r[21] = 0x1B; r[22] = 0x01;
+                r[48] = 0xC8;
                 break;
 
             case 0x40: // Enable/disable IMU streaming
@@ -767,14 +865,14 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 break;
 
             case 0x48: // Enable vibration
-                reply[13] = 0x82;
+                r[13] = 0x82;
                 break;
 
             default: // Unknown: generic ACK, never NACK
                 break;
         }
 
-        SwitchQueueReply(reply);
+        SwitchQueueReply(reply, SwitchFrameSize);
     }
 
     private byte SwitchMac(int i)
@@ -864,32 +962,36 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         int size = Math.Min(data.Length, SharedMemoryIO.DATA_CAPACITY);
         lock (_publishLock)
         {
-            uint newSeq;
-            unsafe { newSeq = (uint)Interlocked.Increment(ref *(int*)view); }
-            int slotIdx = (int)((newSeq - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS);
-            int slotBase = SharedMemoryIO.OUTPUT_HEADER_SIZE + slotIdx * SharedMemoryIO.OUTPUT_SLOT_SIZE;
-            Marshal.WriteByte(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SOURCE, source);
-            Marshal.WriteByte(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_REPORT_ID, reportId);
-            Marshal.WriteInt16(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SIZE, (short)size);
-            if (size > 0)
+            unsafe
             {
-                unsafe
-                {
-                    fixed (byte* src = data)
-                        Buffer.MemoryCopy(src, (byte*)view + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_DATA,
-                            SharedMemoryIO.DATA_CAPACITY, size);
-                }
+                byte* v = (byte*)view;
+                uint newSeq = (uint)Interlocked.Increment(ref *(int*)v);
+                int slotIdx = (int)((newSeq - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS);
+                int slotBase = SharedMemoryIO.OUTPUT_HEADER_SIZE + slotIdx * SharedMemoryIO.OUTPUT_SLOT_SIZE;
+                // A reader OUTPUT_RING_SLOTS packets behind reads the very
+                // slot this packet refills, checking its SeqNo before and
+                // after the copy (SharedMemoryIO.TryReadOutputFrame). Left in
+                // place through the refill, the old SeqNo passes both checks
+                // for a copy mixed from two packets. Zero, the never-written
+                // value, goes in first.
+                Volatile.Write(ref *(int*)(v + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), 0);
+                Volatile.WriteBarrier();
+                v[slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SOURCE] = source;
+                v[slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_REPORT_ID] = reportId;
+                Unsafe.WriteUnaligned(v + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SIZE, (ushort)size);
+                if (size > 0)
+                    data[..size].CopyTo(new Span<byte>(v + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_DATA, size));
+                // A release store: the fields are visible before the number.
+                Volatile.Write(ref *(int*)(v + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), (int)newSeq);
             }
-            Thread.MemoryBarrier();
-            Marshal.WriteInt32(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO, (int)newSeq);
         }
         if (_outputEvent != IntPtr.Zero) SetEvent(_outputEvent);
     }
 
     // 鈹€鈹€ URB dispatch (called on the connection reader thread) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-    public void HandleSubmit(in UsbipProtocol.CommandHeader cmd, byte[]? outPayload,
-                             (uint Offset, uint Length)[]? isoPackets)
+    public void HandleSubmit(in UsbipProtocol.CommandHeader cmd, ReadOnlySpan<byte> outPayload,
+                             ReadOnlySpan<(uint Offset, uint Length)> isoPackets)
     {
         if (cmd.Ep == 0)
         {
@@ -911,16 +1013,17 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
                 return;
             }
-            var urb = new UsbAudioEngine.PendingIso
-            {
-                Seqnum = cmd.Seqnum,
-                IsIn = cmd.IsIn,
-                TransferBufferLength = cmd.TransferBufferLength,
-                Packets = isoPackets ?? Array.Empty<(uint, uint)>(),
-                OutPayload = outPayload,
-                InterfaceNumber = ep.InterfaceNumber,
-                AltSetting = ep.AltSetting,
-            };
+            // The URB and its arrays come from the engine's pool, and the
+            // transfer's packets and OUT data are copied into them now: the
+            // reader's buffers are reused by the next command.
+            var urb = Audio.RentUrb(isoPackets.Length, outPayload.Length);
+            urb.Seqnum = cmd.Seqnum;
+            urb.IsIn = cmd.IsIn;
+            urb.TransferBufferLength = cmd.TransferBufferLength;
+            isoPackets.CopyTo(urb.Packets);
+            outPayload.CopyTo(urb.OutPayload);
+            urb.InterfaceNumber = ep.InterfaceNumber;
+            urb.AltSetting = ep.AltSetting;
             Audio.SubmitIso(urb);
             return;
         }
@@ -941,35 +1044,39 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     return;
                 }
 
-                byte[]? frame = null;
+                QueuedFrame frame = default;
+                bool have = false;
                 lock (_hidLock)
                 {
                     // Protocol replies (GIP 0x02/0x03/0x04/0x07, Switch
                     // 0x81/0x21) preempt stream frames.
-                    if (_gipProtocol && _gipReplies.Count > 0) frame = _gipReplies.Dequeue();
-                    else if (_switchProtocol && _switchReplies.Count > 0) frame = _switchReplies.Dequeue();
-                    else if (_frameQueue.Count > 0) frame = _frameQueue.Dequeue();
+                    if (_gipProtocol && _gipReplies.Count > 0) { frame = _gipReplies.Dequeue(); have = true; }
+                    else if (_switchProtocol && _switchReplies.Count > 0) { frame = _switchReplies.Dequeue(); have = true; }
+                    else if (_frameQueue.Count > 0) { frame = _frameQueue.Dequeue(); have = true; }
                     else
                     {
                         _pendingInterruptIn.Enqueue(cmd.Seqnum);
                     }
                 }
-                if (frame != null) SendInterruptInReply(cmd.Seqnum, frame);
+                if (have)
+                {
+                    SendInterruptInReply(cmd.Seqnum, new ReadOnlySpan<byte>(frame.Buffer, 0, frame.Length));
+                    lock (_hidLock) RecycleFrameLocked(frame.Buffer!);
+                }
                 return;
             }
 
             // Interrupt OUT: a full output report, Report ID first when the
             // descriptor declares IDs. Same split as driver.c WRITE_REPORT.
-            var payload = outPayload ?? Array.Empty<byte>();
-            byte rid = payload.Length > 0 ? payload[0] : (byte)0;
-            var outData = payload.Length > 0 ? payload.AsSpan(1) : ReadOnlySpan<byte>.Empty;
+            byte rid = outPayload.Length > 0 ? outPayload[0] : (byte)0;
+            var outData = outPayload.Length > 0 ? outPayload[1..] : ReadOnlySpan<byte>.Empty;
             if (_gipProtocol)
-                HandleGipOutput(payload); // GIP frames are not report-ID prefixed
+                HandleGipOutput(outPayload); // GIP frames are not report-ID prefixed
             else if (_switchProtocol && (rid == 0x80 || rid == 0x01 || rid == 0x10))
                 HandleSwitchOutput(rid, outData);
             else
                 PublishOutput(SourceHidOutput, rid, outData);
-            SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+            SendRetSubmit(cmd.Seqnum, 0, outPayload.Length, null);
             return;
         }
 
@@ -985,17 +1092,14 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             lock (_hidLock)
             {
-                // Queue<T> has no random removal; rebuild without the victim.
-                if (_pendingInterruptIn.Contains(victimSeqnum))
+                // Queue<T> has no random removal; rotate it once, dropping
+                // the victim and keeping the rest in order.
+                int count = _pendingInterruptIn.Count;
+                for (int i = 0; i < count; i++)
                 {
-                    var keep = new List<uint>(_pendingInterruptIn.Count);
-                    while (_pendingInterruptIn.Count > 0)
-                    {
-                        uint s = _pendingInterruptIn.Dequeue();
-                        if (s != victimSeqnum) keep.Add(s);
-                        else removed = true;
-                    }
-                    foreach (var s in keep) _pendingInterruptIn.Enqueue(s);
+                    uint s = _pendingInterruptIn.Dequeue();
+                    if (s != victimSeqnum) _pendingInterruptIn.Enqueue(s);
+                    else removed = true;
                 }
             }
         }
@@ -1008,7 +1112,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     // 鈹€鈹€ Control transfers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-    private void HandleControl(in UsbipProtocol.CommandHeader cmd, byte[]? outPayload)
+    private void HandleControl(in UsbipProtocol.CommandHeader cmd, ReadOnlySpan<byte> outPayload)
     {
         Span<byte> setup = stackalloc byte[8];
         BitConverter.TryWriteBytes(setup, cmd.Setup);
@@ -1061,7 +1165,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     }
                     if (d == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
                     int n = Math.Min(d.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, d.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d.AsSpan(0, n));
                     return;
                 }
                 case 0x00: // GET_STATUS
@@ -1069,9 +1173,11 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     if (!deviceToHost) break;
                     // Device: self-powered bit from bmAttributes 0xC0. Interface/endpoint: zero.
                     ushort status = recipient == 0 ? (ushort)0x0001 : (ushort)0x0000;
-                    var d = new[] { (byte)(status & 0xFF), (byte)(status >> 8) };
+                    Span<byte> d = stackalloc byte[2];
+                    d[0] = (byte)(status & 0xFF);
+                    d[1] = (byte)(status >> 8);
                     int n = Math.Min(d.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, d.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 case 0x09: // SET_CONFIGURATION
@@ -1081,9 +1187,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     return;
                 case 0x08: // GET_CONFIGURATION
                 {
-                    var d = new[] { _configurationValue };
+                    Span<byte> d = stackalloc byte[1];
+                    d[0] = _configurationValue;
                     int n = Math.Min(1, (int)wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, n > 0 ? d : null);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 case 0x0B: // SET_INTERFACE
@@ -1092,10 +1199,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     return;
                 case 0x0A: // GET_INTERFACE
                 {
-                    byte alt = Audio?.GetAltSetting((byte)(wIndex & 0xFF)) ?? (byte)0;
-                    var d = new[] { alt };
-                    SendRetSubmit(cmd.Seqnum, 0, Math.Min(1, (int)wLength),
-                        wLength > 0 ? d : null);
+                    Span<byte> d = stackalloc byte[1];
+                    d[0] = Audio?.GetAltSetting((byte)(wIndex & 0xFF)) ?? (byte)0;
+                    int n = Math.Min(1, (int)wLength);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 case 0x01: // CLEAR_FEATURE (ENDPOINT_HALT arrives via ude clear_endpoint_stall)
@@ -1127,17 +1234,17 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             {
                 if (deviceToHost)
                 {
-                    var d = Audio.HandleUacGet(bRequest, unitId, selector, channel, wLength);
-                    if (d == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
-                    int n = Math.Min(d.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, d.AsSpan(0, n).ToArray());
+                    Span<byte> d = stackalloc byte[2];
+                    int size = Audio.HandleUacGet(bRequest, unitId, selector, channel, wLength, d);
+                    if (size < 0) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
+                    int n = Math.Min(size, wLength);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                 }
                 else
                 {
                     bool ok = bRequest == 0x01 // SET_CUR
-                        && Audio.HandleUacSet(unitId, selector, channel,
-                            outPayload ?? Array.Empty<byte>());
-                    if (ok) SendRetSubmit(cmd.Seqnum, 0, outPayload?.Length ?? 0, null);
+                        && Audio.HandleUacSet(unitId, selector, channel, outPayload);
+                    if (ok) SendRetSubmit(cmd.Seqnum, 0, outPayload.Length, null);
                     else SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
                 }
                 return;
@@ -1158,13 +1265,13 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             {
                 if (deviceToHost)
                 {
-                    var freq = new byte[] { 0x80, 0xBB, 0x00 }; // 48000, 3-byte UAC1 rate
+                    Span<byte> freq = stackalloc byte[3] { 0x80, 0xBB, 0x00 }; // 48000, 3-byte UAC1 rate
                     int n = Math.Min(freq.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, freq.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, freq[..n]);
                 }
                 else
                 {
-                    SendRetSubmit(cmd.Seqnum, 0, outPayload?.Length ?? 0, null);
+                    SendRetSubmit(cmd.Seqnum, 0, outPayload.Length, null);
                 }
                 return;
             }
@@ -1177,23 +1284,23 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         // for non-HID controllers (Xbox 360 capability report, etc.).
         if (type == 2 && recipient == 1 && _vendorRequests != null)
         {
-            foreach (var r in _vendorRequests)
+            for (int i = 0; i < _vendorRequests.Length; i++)
             {
+                var r = _vendorRequests[i];
                 if (r.RequestType != bmRequestType || r.Request != bRequest
                     || r.Value != wValue || r.Index != wIndex)
                     continue;
                 if (deviceToHost)
                 {
-                    if (r.Response == null) break;
-                    var bytes = Convert.FromHexString(
-                        r.Response.Replace(" ", "").Replace("-", ""));
+                    var bytes = _vendorResponses?[i];
+                    if (bytes == null) break;
                     int n = Math.Min(bytes.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, bytes.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, bytes.AsSpan(0, n));
                 }
                 else
                 {
-                    PublishOutput(SourceHidFeature, 0, outPayload ?? ReadOnlySpan<byte>.Empty);
-                    SendRetSubmit(cmd.Seqnum, 0, outPayload?.Length ?? 0, null);
+                    PublishOutput(SourceHidFeature, 0, outPayload);
+                    SendRetSubmit(cmd.Seqnum, 0, outPayload.Length, null);
                 }
                 return;
             }
@@ -1203,7 +1310,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     }
 
     private void HandleHidClassRequest(in UsbipProtocol.CommandHeader cmd, byte bRequest,
-        ushort wValue, ushort wLength, bool deviceToHost, byte[]? outPayload)
+        ushort wValue, ushort wLength, bool deviceToHost, ReadOnlySpan<byte> outPayload)
     {
         byte reportType = (byte)(wValue >> 8); // 1 input, 2 output, 3 feature
         byte reportId = (byte)(wValue & 0xFF);
@@ -1217,9 +1324,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 // report IDs).
                 if (_resolutionMultiplier > 0 && reportType == 0x03 && reportId == 0)
                 {
-                    var d = new[] { _resolutionMultiplierValue };
+                    Span<byte> d = stackalloc byte[1];
+                    d[0] = _resolutionMultiplierValue;
                     int n = Math.Min(1, (int)wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, n > 0 ? d : null);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 if (reportType == 0x01)
@@ -1238,10 +1346,13 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                             return;
                         }
                     }
-                    byte[] snapshot;
-                    lock (_hidLock) snapshot = _lastInputReport;
-                    int n = Math.Min(snapshot.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
+                    int n;
+                    lock (_hidLock)
+                    {
+                        n = Math.Min(Math.Min(_lastInputReportLength, _lastInputReport.Length), wLength);
+                        _lastInputReport.AsSpan(0, n).CopyTo(_controlReply);
+                    }
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, _controlReply.AsSpan(0, n));
                     return;
                 }
                 if (reportType == 0x03)
@@ -1249,7 +1360,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     // Sony DualSense test command response (Report ID 0x81)
                     if (_testCmdReady)
                     {
-                        byte[] response;
+                        ReadOnlySpan<byte> response;
                         int responseLen;
 
                         if (_testCmdPagesRemaining >= 0)
@@ -1263,12 +1374,12 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                                 int offset = currentPage * 56;
                                 if (offset + 56 <= _testCmdResponse.Length)
                                 {
-                                    byte[] telemetryPage = new byte[60];
+                                    var telemetryPage = _controlReply.AsSpan(0, 60);
                                     telemetryPage[0] = 0x81;
                                     telemetryPage[1] = _testCmdTelemetryDeviceId;
                                     telemetryPage[2] = _testCmdTelemetryActionId;
                                     telemetryPage[3] = _testCmdPagesRemaining > 1 ? (byte)0x03 : (byte)0x02;
-                                    _testCmdResponse.AsSpan(offset, 56).CopyTo(telemetryPage.AsSpan(4));
+                                    _testCmdResponse.AsSpan(offset, 56).CopyTo(telemetryPage[4..]);
                                     response = telemetryPage;
                                     responseLen = 60;
                                     _testCmdPagesRemaining--;
@@ -1277,7 +1388,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                                         _testCmdReady = false;
                                     }
                                     int telemN = Math.Min(responseLen, wLength);
-                                    SendRetSubmit(cmd.Seqnum, 0, telemN, response.AsSpan(0, telemN).ToArray());
+                                    SendRetSubmitSpan(cmd.Seqnum, 0, telemN, response[..telemN]);
                                     return;
                                 }
                             }
@@ -1317,12 +1428,13 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                                 {
                                     maxResponseLen = wLength;
                                 }
-                                byte[] headeredResponse = new byte[Math.Min(4 + dataLen, ResponseBufferMaxLength)];
+                                int headeredLength = Math.Min(4 + dataLen, ResponseBufferMaxLength);
+                                var headeredResponse = _controlReply.AsSpan(0, headeredLength);
                                 headeredResponse[0] = 0x81;
                                 headeredResponse[1] = _testCmdStandardDeviceId;
                                 headeredResponse[2] = _testCmdStandardActionId;
                                 headeredResponse[3] = 0x02; // COMPLETE
-                                _testCmdResponse.AsSpan(0, dataLen).CopyTo(headeredResponse.AsSpan(4));
+                                _testCmdResponse.AsSpan(0, dataLen).CopyTo(headeredResponse[4..]);
                                 response = headeredResponse;
                                 responseLen = Math.Min(4 + dataLen, wLength);
                                 _testCmdStandardDeviceId = 0;
@@ -1339,22 +1451,22 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                         }
 
                         int n = Math.Min(responseLen, wLength);
-                        SendRetSubmit(cmd.Seqnum, 0, n, response.AsSpan(0, n).ToArray());
+                        SendRetSubmitSpan(cmd.Seqnum, 0, n, response[..n]);
                         return;
                     }
 
-                    var stub = BuildFeatureStub(reportId, wLength);
-                    if (stub == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
+                    int stubLen = BuildFeatureStub(reportId, wLength, _controlReply);
+                    if (stubLen < 0) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
                     PublishOutput(SourceHidFeatureRead, reportId, ReadOnlySpan<byte>.Empty);
-                    int stubLen = Math.Min(stub.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, stubLen, stub.AsSpan(0, stubLen).ToArray());
+                    int stubN = Math.Min(stubLen, wLength);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, stubN, _controlReply.AsSpan(0, stubN));
                     return;
                 }
                 break;
             }
             case 0x09 when !deviceToHost: // SET_REPORT
             {
-                var payload = outPayload ?? Array.Empty<byte>();
+                var payload = outPayload;
                 // Resolution Multiplier feature (report 0, no report-ID byte in
                 // the payload): store the host's value and ack.
                 if (_resolutionMultiplier > 0 && reportType == 0x03 && reportId == 0)
@@ -1364,7 +1476,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     return;
                 }
                 byte rid = payload.Length > 0 ? payload[0] : reportId;
-                var data = payload.Length > 0 ? payload.AsSpan(1) : ReadOnlySpan<byte>.Empty;
+                var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
 
                 // Switch Pro: keyboard-style SetReport routing of the 0x80/0x01/
                 // 0x10 output reports (some HID stacks send these via the control
@@ -1494,9 +1606,13 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 SendRetSubmit(cmd.Seqnum, 0, 0, null);
                 return;
             case 0x02 when deviceToHost: // GET_IDLE
-                SendRetSubmit(cmd.Seqnum, 0, Math.Min(1, (int)wLength),
-                    wLength > 0 ? new byte[] { 0 } : null);
+            {
+                Span<byte> d = stackalloc byte[1];
+                d[0] = 0;
+                int n = Math.Min(1, (int)wLength);
+                SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                 return;
+            }
         }
         // GET/SET_PROTOCOL and anything else: the pad is not a boot device;
         // a real one stalls these.
@@ -1504,70 +1620,74 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     }
 
     /// <summary>driver.c's Sony Get_Feature stub table, sized against
-    /// wLength the way the driver sizes its feature reads.</summary>
-    private byte[]? BuildFeatureStub(byte reportId, ushort wLength)
+    /// wLength the way the driver sizes its feature reads. The answer is
+    /// written into <paramref name="reply"/>, and its length returned, or
+    /// -1 to stall.</summary>
+    private int BuildFeatureStub(byte reportId, ushort wLength, Span<byte> reply)
     {
-        if (Descriptors.VendorId != 0x054C) return null;
+        if (Descriptors.VendorId != 0x054C) return -1;
         switch (reportId)
         {
             case 0x05:
-                if (wLength < 41) return null;
+                if (wLength < 41) return -1;
                 {
                     // A DS4 orders this report's gyro pairs differently from
                     // the DualSense, exactly as driver.c serves it. Every
                     // composite persona is USB, so no Bluetooth CRC.
                     ushort pid = Descriptors.ProductId;
                     bool ds4 = pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0;
-                    var p = new byte[41];
-                    p[0] = reportId;
-                    (ds4 ? SonyCalibrationDs4Bt : SonyCalibration).CopyTo(p, 1);
-                    return p;
+                    reply[..41].Clear();
+                    reply[0] = reportId;
+                    (ds4 ? SonyCalibrationDs4Bt : SonyCalibration).CopyTo(reply[1..]);
+                    return 41;
                 }
             case 0x09:
-                if (wLength < 20) return null;
+                if (wLength < 20) return -1;
                 {
-                    var p = new byte[20];
-                    p[0] = reportId;
-                    p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; // locally administered, 'H' 'M'
-                    p[4] = 0x00; p[5] = 0x00; p[6] = (byte)_index;
-                    return p;
+                    reply[..20].Clear();
+                    reply[0] = reportId;
+                    reply[1] = 0x02; reply[2] = 0x48; reply[3] = 0x4D; // locally administered, 'H' 'M'
+                    reply[4] = 0x00; reply[5] = 0x00; reply[6] = (byte)_index;
+                    return 20;
                 }
             case 0x20:
                 // DS4 feature report 0x20: 64-byte structure with serial at offset 12-20.
                 // DualSense uses Ds5FirmwareInfo; DS4 uses Ds4FeatureReport20.
-                if (wLength < 64) return null;
+                if (wLength < 64) return -1;
                 {
                     if (Descriptors.ProductId == 0x09CC || Descriptors.ProductId == 0x05C4)
                     {
                         // DS4 (CUH-ZCT1/2)
-                        return (byte[])Ds4FeatureReport20.Clone();
+                        Ds4FeatureReport20.CopyTo(reply);
+                        return Ds4FeatureReport20.Length;
                     }
-                    var p = (byte[])Ds5FirmwareInfo.Clone();
+                    Ds5FirmwareInfo.CopyTo(reply);
                     if (Descriptors.ProductId == 0x0DF2)
                     {
-                        p[22] = 0x44; p[23] = 0x00;
-                        p[44] = 0x17; p[45] = 0x02;
+                        reply[22] = 0x44; reply[23] = 0x00;
+                        reply[44] = 0x17; reply[45] = 0x02;
                     }
-                    return p;
+                    return Ds5FirmwareInfo.Length;
                 }
             case 0x81:
                 // DS4 authentication challenge response (after SET_FEATURE 0x80 subcommand 0x03).
                 // Returns 50528769 (0x03030301) big-endian at offset 1.
-                if (wLength < 64) return null;
-                return (byte[])Ds4FeatureReport81.Clone();
+                if (wLength < 64) return -1;
+                Ds4FeatureReport81.CopyTo(reply);
+                return Ds4FeatureReport81.Length;
             case 0x12:
                 // DS4 pairing info over USB. The DS4's equivalent of 0x09,
                 // and the one Sony read whose absence is fatal rather than
                 // cosmetic: hid-playstation's caller aborts device creation
                 // when it fails. MAC at bytes 1..6, non-zero, locally
                 // administered, matching the 0x09 path exactly.
-                if (wLength < 16) return null;
+                if (wLength < 16) return -1;
                 {
-                    var p = new byte[16];
-                    p[0] = reportId;
-                    p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; // locally administered, 'H' 'M'
-                    p[4] = 0x00; p[5] = 0x00; p[6] = (byte)_index;
-                    return p;
+                    reply[..16].Clear();
+                    reply[0] = reportId;
+                    reply[1] = 0x02; reply[2] = 0x48; reply[3] = 0x4D; // locally administered, 'H' 'M'
+                    reply[4] = 0x00; reply[5] = 0x00; reply[6] = (byte)_index;
+                    return 16;
                 }
             case 0x22:
                 // Bluetooth patch info. Zero past the report ID is the real
@@ -1575,17 +1695,32 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 // skips the row on a falsy value. It only has to exist
                 // because the real 0x20 above opens the traceability branch
                 // that reads it; see driver.c for the full reasoning.
-                if (wLength < 64) return null;
-                { var p = new byte[64]; p[0] = reportId; return p; }
+                if (wLength < 64) return -1;
+                reply[..64].Clear();
+                reply[0] = reportId;
+                return 64;
             case 0x02:
-                if (wLength >= 41) { var p = new byte[41]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
-                if (wLength >= 37) { var p = new byte[37]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
-                return null;
+                if (wLength >= 41)
+                {
+                    reply[..41].Clear();
+                    reply[0] = reportId;
+                    SonyCalibration.CopyTo(reply[1..]);
+                    return 41;
+                }
+                if (wLength >= 37)
+                {
+                    reply[..37].Clear();
+                    reply[0] = reportId;
+                    SonyCalibration.CopyTo(reply[1..]);
+                    return 37;
+                }
+                return -1;
             case 0xA3:
-                if (wLength < 49) return null;
-                { var p = (byte[])Ds4FirmwareInfo.Clone(); return p; }
+                if (wLength < 49) return -1;
+                Ds4FirmwareInfo.CopyTo(reply);
+                return Ds4FirmwareInfo.Length;
             default:
-                return null;
+                return -1;
         }
     }
 
@@ -1766,9 +1901,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         lock (_hidLock)
         {
             _pendingInterruptIn.Clear();
-            _frameQueue.Clear();
-            _switchReplies.Clear();
-            _gipReplies.Clear();
+            ClearQueuesLocked();
         }
         _switchImuEnabled = false;
         Interlocked.Exchange(ref _switchTimerCounter, 0);
@@ -1796,12 +1929,18 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     // runs the detach path.
 
     private void SendInterruptInReply(uint seqnum, byte[] frame)
-        => SendRetSubmit(seqnum, 0, frame.Length, frame);
+        => SendRetSubmitSpan(seqnum, 0, frame.Length, frame);
+
+    private void SendInterruptInReply(uint seqnum, ReadOnlySpan<byte> frame)
+        => SendRetSubmitSpan(seqnum, 0, frame.Length, frame);
 
     private void SendError(uint seqnum, int status)
-        => SendRetSubmit(seqnum, status, 0, null);
+        => SendRetSubmitSpan(seqnum, status, 0, ReadOnlySpan<byte>.Empty);
 
     private void SendRetSubmit(uint seqnum, int status, int actualLength, byte[]? inPayload)
+        => SendRetSubmitSpan(seqnum, status, actualLength, inPayload);
+
+    private void SendRetSubmitSpan(uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
     {
         var c = _connection;
         if (c == null) return;
@@ -1815,7 +1954,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     /// <summary>Completion callback from the audio engine's pacing thread.
     /// Builds the isochronous RET_SUBMIT per the 0.9.8.0 receive rules.</summary>
-    private void CompleteIsoOnWire(UsbAudioEngine.PendingIso p, byte[]? inCompacted, int perPacketActual)
+    private void CompleteIsoOnWire(UsbAudioEngine.PendingIso p, ReadOnlySpan<byte> inCompacted, int perPacketActual)
     {
         var c = _connection;
         if (c == null) return;

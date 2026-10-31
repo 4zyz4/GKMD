@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -346,80 +347,89 @@ internal static class SharedMemoryIO
     /// <para><paramref name="eventHandle"/> may be <see cref="IntPtr.Zero"/>
     /// if no signaling event exists (e.g. older driver that still polls
     /// without opening the event). The SetEvent call is skipped in that
-    /// case — the write still completes normally.</para></summary>
-    public static void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
-                                       byte[] data, int dataLen, byte[]? gipData,
+    /// case — the write still completes normally.</para>
+    ///
+    /// <para>The stores go through the view's pointer, as HIDMaestro
+    /// 2.0.0's writer does. Each Marshal.WriteInt32 and Marshal.Copy they
+    /// replace was a call the JIT does not inline, four or five a frame.
+    /// The two lanes take spans, so a caller writes its frame from where
+    /// it already is, with no copy into a buffer of its own first. The
+    /// seqlock uses one write barrier after the odd number instead of two
+    /// full fences: the payload's stores must follow the odd number
+    /// (<see cref="Volatile.WriteBarrier"/>), and the even number is a
+    /// release store, so the payload is visible before it.</para></summary>
+    public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
+                                       ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
-                                       byte[]? extendedData = null, int extendedLen = 0,
+                                       ReadOnlySpan<byte> extendedData = default, int extendedLen = 0,
                                        IntPtr companionEvent = default)
     {
-        // 1. Mark write in progress (odd seqNo)
+        if (view == IntPtr.Zero) throw new AccessViolationException();
+        byte* v = (byte*)view;
+
+        // 1. Mark write in progress (odd seqNo). The payload's stores must
+        // not become visible before the odd number.
         uint pending = seqNo + 1;
-        Marshal.WriteInt32(view, 0, (int)pending);
-        Thread.MemoryBarrier();
+        Volatile.Write(ref *(uint*)v, pending);
+        Volatile.WriteBarrier();
 
         // 2. Write payload (DataSize + Data + GipData + ExtendedReport*).
-        // v1.3.0 — bulk Marshal.Copy replaces the prior per-byte
-        // Marshal.WriteByte loops, which were 256 + 14 = 270 P/Invoke
-        // calls per frame. At 250 Hz × 6 controllers that was ~400 000
-        // P/Invokes/sec; a single bulk copy per region is two
-        // P/Invokes/frame total. We don't zero the unused data tail past
-        // dataLen — backend/consumer reads DataSize and uses only
-        // data[0..DataSize-1]; the tail is irrelevant. T26-2 — gipData
-        // is null for non-Xbox profiles (no XUSB companion bound), so we
-        // can skip the 14-byte copy entirely. Section is zero-initialized
-        // at create time, so the GIP slice stays zeros.
+        // We don't zero the unused data tail past dataLen — backend/consumer
+        // reads DataSize and uses only data[0..DataSize-1]; the tail is
+        // irrelevant. gipData is null for non-Xbox profiles (no XUSB
+        // companion bound), so the 14-byte copy is skipped entirely. The
+        // section is zero-initialized at create time, so the GIP slice
+        // stays zeros.
         //
-        // v1.3.5 — when extendedData != null AND extendedLen > 0, copy
-        // the full RID-included extended report into ExtendedReportData
-        // and set ExtendedReportSize. Backend branches on
-        // ExtendedReportSize > 0 and emits ExtendedReportData verbatim
-        // (no FirstInputReportId prepend). When extendedData is null we
-        // explicitly clear ExtendedReportSize so a previously-armed
-        // controller's stale extended bytes don't leak through after
-        // a legacy-mode frame (e.g. if armOn fires were ever rolled back
-        // — currently they aren't, but cheap insurance).
-        Marshal.WriteInt32(view, 4, dataLen);
+        // When extendedData is not empty AND extendedLen > 0, the full
+        // RID-included extended report goes into ExtendedReportData and
+        // ExtendedReportSize is set. The backend branches on
+        // ExtendedReportSize > 0 and emits ExtendedReportData verbatim (no
+        // FirstInputReportId prepend). Otherwise ExtendedReportSize is
+        // explicitly cleared so a previously-armed controller's stale
+        // extended bytes don't leak through after a legacy-mode frame.
+        // The size word at 278 is not 4-byte aligned, so it takes an
+        // unaligned store as Marshal.WriteInt32 did.
+        Unsafe.WriteUnaligned(v + 4, dataLen);
         if (dataLen > 0)
-            Marshal.Copy(data, dataOffset, view + DATA_OFFSET, dataLen);
+            data.Slice(dataOffset, dataLen).CopyTo(new Span<byte>(v + DATA_OFFSET, dataLen));
         if (gipData != null)
-            Marshal.Copy(gipData, 0, view + GIP_DATA_OFFSET, GIP_DATA_LENGTH);
-        if (extendedData != null && extendedLen > 0)
+            gipData.AsSpan(0, GIP_DATA_LENGTH).CopyTo(new Span<byte>(v + GIP_DATA_OFFSET, GIP_DATA_LENGTH));
+        if (!extendedData.IsEmpty && extendedLen > 0)
         {
             int copyLen = Math.Min(extendedLen, EXTENDED_DATA_CAPACITY);
-            Marshal.Copy(extendedData, 0, view + EXTENDED_DATA_OFFSET, copyLen);
-            Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, copyLen);
+            extendedData.Slice(0, copyLen).CopyTo(new Span<byte>(v + EXTENDED_DATA_OFFSET, copyLen));
+            Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, copyLen);
         }
         else
         {
-            // Mandatory per-frame clear: named sections (Global\GKMDInput<N>)
-            // can be opened concurrently by other processes (CreateFileMappingW
-            // returns existing handle for any caller passing the same name + SDDL).
-            // Across emulate-app restarts the SDK re-zeros at create time, but
-            // BETWEEN restarts a foreign writer could have left ExtendedReportSize
-            // > 0 + ExtendedReportData populated; with the legacy path running
-            // (USB Sony, generic profiles) that stale extended buffer would be
-            // emitted by the backend, breaking input. Cost is one P/Invoke per
-            // frame.
-            Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, 0);
+            Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, 0);
         }
 
-        // 3. Mark write complete (even seqNo)
-        Thread.MemoryBarrier();
+        // 3. Mark write complete (even seqNo). A volatile write is a
+        // release: the payload is visible before the number.
         seqNo = pending + 1;
-        Marshal.WriteInt32(view, 0, (int)seqNo);
+        Volatile.Write(ref *(uint*)v, seqNo);
 
-        // 4. Wake the backend's input pump. Auto-reset event: one
-        // successful wait consumes the signal. If the backend is still
-        // processing a previous frame the signal stays latched until
-        // it returns to WaitForMultipleObjects.
+        // 4. Wake the backend's input pump and, for a frame that carries
+        // GIP bytes, the XUSB companion. Kept out of line so a submit that
+        // writes nothing (a state block, a device with ports) pays no
+        // native-call frame.
+        Signal(eventHandle, companionEvent, gipData != null);
+    }
+
+    /// <summary>The frame doorbells, once or twice a frame. Never inlined:
+    /// a method the JIT inlines a P/Invoke into sets up the native-call
+    /// frame on every entry, including calls that signal nothing.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Signal(IntPtr eventHandle, IntPtr companionEvent, bool hasGip)
+    {
+        // Auto-reset event: one successful wait consumes the signal. If the
+        // backend is still processing a previous frame the signal stays
+        // latched until it returns to WaitForMultipleObjects.
         if (eventHandle != IntPtr.Zero)
             SetEvent(eventHandle);
-
-        // 5. Companion doorbell (perf audit 2026-07-21): only frames that
-        // carry GIP bytes feed the XUSB companion's WAIT_FOR_INPUT pump,
-        // so non-Xbox profiles pay nothing here.
-        if (companionEvent != IntPtr.Zero && gipData != null)
+        if (companionEvent != IntPtr.Zero && hasGip)
             SetEvent(companionEvent);
     }
 
@@ -693,6 +703,8 @@ internal static class SharedMemoryIO
     private static extern IntPtr OpenEventW(uint dwDesiredAccess, bool bInheritHandle,
         string lpName);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    // The frame writer's doorbell. Nothing reads its error, so the stub
+    // neither clears nor saves the last error around it.
+    [DllImport("kernel32.dll")]
     private static extern bool SetEvent(IntPtr hEvent);
 }

@@ -30,19 +30,27 @@ namespace GKMD.Internal.Usbip;
 /// actual_length equal to the sum of per-packet actual lengths.</para></summary>
 internal sealed class UsbAudioEngine : IDisposable
 {
-    /// <summary>A pending isochronous URB, parked until its due tick.</summary>
+    /// <summary>A pending isochronous URB, parked until its due tick.
+    /// URBs are reused (<see cref="RentUrb"/>), so their arrays are at
+    /// least as long as the sizes they were rented for.</summary>
     internal sealed class PendingIso
     {
         public uint Seqnum;
         public bool IsIn;
         public int TransferBufferLength;
         public (uint Offset, uint Length)[] Packets = Array.Empty<(uint, uint)>();
-        public byte[]? OutPayload;      // OUT only: the PCM the host sent
+        public int PacketCount;         // entries of Packets this URB uses
+        public byte[] OutPayload = Array.Empty<byte>(); // OUT only: the PCM the host sent
+        public int OutLength;           // bytes of OutPayload this URB uses
         public long DueTick;            // Stopwatch timestamp when the last packet's window closes
         public int FrameAtCompletion;   // virtual frame counter value to report
         public byte InterfaceNumber;    // the streaming interface the endpoint belongs to
         public byte AltSetting;         // the alternate setting that declares the endpoint
     }
+
+    /// <summary>An isochronous completion, with the microphone data for an
+    /// IN URB. The memory is valid for the duration of the callback.</summary>
+    internal delegate void IsoCompletion(PendingIso urb, ReadOnlySpan<byte> inData, int perPacketActual);
 
     private readonly object _lock = new();
     private readonly List<PendingIso> _pending = new();
@@ -52,7 +60,16 @@ internal sealed class UsbAudioEngine : IDisposable
     private readonly IntPtr[] _waitPair = new IntPtr[2];
     private volatile bool _stop;
 
-    private readonly Action<PendingIso, byte[]?, int> _complete;
+    private readonly IsoCompletion _complete;
+
+    // Spent URBs, handed out again by RentUrb, so a submit allocates
+    // nothing once the pool has warmed. Guarded by _lock.
+    private readonly Stack<PendingIso> _spareUrbs = new();
+    private const int MaxSpareUrbs = 32;
+
+    // The pump's microphone buffer, filled at each completion and handed to
+    // the completion callback, which sends it before the next pass.
+    private byte[] _micOut = Array.Empty<byte>();
 
     // Stream cursors, one per direction, in Stopwatch ticks. Zero means
     // "no stream in flight; next URB re-anchors to now".
@@ -162,7 +179,7 @@ internal sealed class UsbAudioEngine : IDisposable
     // to the last one is not raised again. The event thread's alone.
     private readonly Dictionary<byte, byte> _altRaised = new();
 
-    public UsbAudioEngine(ControllerProfile profile, Action<PendingIso, byte[]?, int> complete)
+    public UsbAudioEngine(ControllerProfile profile, IsoCompletion complete)
     {
         _complete = complete;
 
@@ -214,6 +231,28 @@ internal sealed class UsbAudioEngine : IDisposable
 
     // ── Submission (called from the connection reader thread) ────────────
 
+    /// <summary>A URB to fill and submit, with room for
+    /// <paramref name="packets"/> packets and <paramref name="outLength"/>
+    /// bytes of OUT data. Reused once a spend URB has been sent.</summary>
+    public PendingIso RentUrb(int packets, int outLength)
+    {
+        PendingIso? urb = null;
+        lock (_lock)
+            if (_spareUrbs.Count > 0) urb = _spareUrbs.Pop();
+        urb ??= new PendingIso();
+        if (urb.Packets.Length < packets) urb.Packets = new (uint, uint)[packets];
+        if (urb.OutPayload.Length < outLength) urb.OutPayload = new byte[outLength];
+        urb.PacketCount = packets;
+        urb.OutLength = outLength;
+        return urb;
+    }
+
+    /// <summary>Caller holds <see cref="_lock"/>.</summary>
+    private void ReturnUrbLocked(PendingIso urb)
+    {
+        if (_spareUrbs.Count < MaxSpareUrbs) _spareUrbs.Push(urb);
+    }
+
     /// <summary>Queue an isochronous URB. Due time comes from the per-
     /// direction stream cursor: each packet advances the cursor one
     /// service interval; a cursor in the past re-anchors to now (stream
@@ -225,10 +264,14 @@ internal sealed class UsbAudioEngine : IDisposable
         {
             // After Dispose the pump has ended, or is ending and closing its
             // event.
-            if (_stop) return;
+            if (_stop)
+            {
+                ReturnUrbLocked(urb);
+                return;
+            }
             ref long cursor = ref urb.IsIn ? ref _inCursor : ref _outCursor;
             if (cursor < now - 50 * TicksPerMs) cursor = now; // (re)anchor
-            cursor += urb.Packets.Length * TicksPerMs;
+            cursor += urb.PacketCount * TicksPerMs;
             urb.DueTick = cursor;
             _pending.Add(urb);
 
@@ -258,7 +301,9 @@ internal sealed class UsbAudioEngine : IDisposable
             {
                 if (_pending[i].Seqnum == seqnum)
                 {
+                    var urb = _pending[i];
                     _pending.RemoveAt(i);
+                    ReturnUrbLocked(urb);
                     return true;
                 }
             }
@@ -270,7 +315,11 @@ internal sealed class UsbAudioEngine : IDisposable
     /// sent; the socket is going away.</summary>
     public void Clear()
     {
-        lock (_lock) _pending.Clear();
+        lock (_lock)
+        {
+            foreach (var urb in _pending) ReturnUrbLocked(urb);
+            _pending.Clear();
+        }
     }
 
     // ── Alternate settings ───────────────────────────────────────────────
@@ -514,33 +563,37 @@ internal sealed class UsbAudioEngine : IDisposable
 
     // ── UAC1 class-request handling (called from the reader thread) ──────
 
-    /// <summary>GET_CUR/MIN/MAX/RES on a feature unit. Returns the raw
-    /// little-endian value bytes, or null to stall (unknown unit or
-    /// selector, matching a real pad's refusal).</summary>
-    public byte[]? HandleUacGet(byte bRequest, byte unitId, byte selector, byte channel, int wLength)
+    /// <summary>GET_CUR/MIN/MAX/RES on a feature unit. Writes the raw
+    /// little-endian value bytes into <paramref name="dst"/> and returns
+    /// their count, or -1 to stall (unknown unit or selector, matching a
+    /// real pad's refusal).</summary>
+    public int HandleUacGet(byte bRequest, byte unitId, byte selector, byte channel, int wLength,
+                            Span<byte> dst)
     {
-        if (!_knownUnits.Contains(unitId)) return null;
+        if (!_knownUnits.Contains(unitId)) return -1;
         short value;
         lock (_lock)
         {
             switch (bRequest)
             {
                 case 0x81: // GET_CUR
-                    if (!_controlCur.TryGetValue((unitId, selector, channel), out value)) return null;
+                    if (!_controlCur.TryGetValue((unitId, selector, channel), out value)) return -1;
                     break;
                 case 0x82: // GET_MIN
                 case 0x83: // GET_MAX
                 case 0x84: // GET_RES
-                    if (!_controlRange.TryGetValue((unitId, selector, channel), out var range)) return null;
+                    if (!_controlRange.TryGetValue((unitId, selector, channel), out var range)) return -1;
                     value = bRequest == 0x82 ? range.Min : bRequest == 0x83 ? range.Max : range.Res;
                     break;
                 default:
-                    return null;
+                    return -1;
             }
         }
         // Mute is a 1-byte control, volume 2-byte; serve what the host asked.
-        if (wLength <= 1) return new[] { (byte)value };
-        return new[] { (byte)(value & 0xFF), (byte)((value >> 8) & 0xFF) };
+        dst[0] = (byte)value;
+        if (wLength <= 1) return 1;
+        dst[1] = (byte)((value >> 8) & 0xFF);
+        return 2;
     }
 
     /// <summary>SET_CUR on a feature unit. Returns false to stall.</summary>
@@ -641,9 +694,11 @@ internal sealed class UsbAudioEngine : IDisposable
             // Fill each packet from the microphone ring, compacted per the
             // protocol. Baseline one service interval per packet; underrun
             // fills silence so the stream never starves usbaudio.
-            int per = Math.Min(_micBytesPerInterval, p.Packets.Length > 0 ? (int)p.Packets[0].Length : _micBytesPerInterval);
+            int per = Math.Min(_micBytesPerInterval, p.PacketCount > 0 ? (int)p.Packets[0].Length : _micBytesPerInterval);
             if (per <= 0) per = _micBytesPerInterval;
-            var data = new byte[per * p.Packets.Length];
+            int length = per * p.PacketCount;
+            if (_micOut.Length < length) _micOut = new byte[length];
+            var data = _micOut.AsSpan(0, length);
             lock (_lock)
             {
                 int buffered = (_micHead - _micTail + _micRing.Length) % _micRing.Length;
@@ -656,16 +711,21 @@ internal sealed class UsbAudioEngine : IDisposable
                     _micTail = (_micTail + 1) % _micRing.Length;
                 }
                 // Remainder stays zero: silence.
+                data[take..].Clear();
             }
             _complete(p, data, per);
         }
         else
         {
-            var payload = p.OutPayload;
-            if (payload != null && payload.Length > 0)
+            var payload = p.OutLength > 0
+                ? new ReadOnlyMemory<byte>(p.OutPayload, 0, p.OutLength)
+                : ReadOnlyMemory<byte>.Empty;
+            if (!payload.IsEmpty)
                 AudioEventRaise.Each(OutFrames, payload, nameof(OutFrames));
-            _complete(p, null, 0);
+            _complete(p, ReadOnlySpan<byte>.Empty, 0);
         }
+        // Sent: the URB goes back for the next submit.
+        lock (_lock) ReturnUrbLocked(p);
     }
 
     /// <summary>Stop the pump and the event thread. Changes queued before
