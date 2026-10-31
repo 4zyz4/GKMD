@@ -1,8 +1,8 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
-[assembly: AssemblyVersion("4.7.0.0")]
-[assembly: AssemblyFileVersion("4.7.0.0")]
+[assembly: AssemblyVersion("4.7.1.0")]
+[assembly: AssemblyFileVersion("4.7.1.0")]
 
 // The GKME application links the engine as a separate assembly but still
 // reaches into a few internals (the USB/IP transport installer in
