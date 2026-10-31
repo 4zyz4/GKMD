@@ -97,7 +97,7 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Resource logical names | `HIDMaestro.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
-| Version | `2.0.3` | `4.7.1.0` (follows GKME) |
+| Version | `2.0.3` | `4.8.0.0` (follows GKME) |
 | AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally; the host publishes with `PublishAot` |
 | ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Managed AnyCPU assembly; bundled usbip-win2 payload is x64-only |
 | Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |

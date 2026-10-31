@@ -106,7 +106,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 资源逻辑名 | `HIDMaestro.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
-| 版本 | `2.0.3` | `4.7.1.0`（跟随 GKME） |
+| 版本 | `2.0.3` | `4.8.0.0`（跟随 GKME） |
 | AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制；由宿主以 `PublishAot` 发布 |
 | ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 托管 AnyCPU 程序集；捆绑的 usbip-win2 载荷仅 x64 |
 | 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |

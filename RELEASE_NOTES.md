@@ -1,10 +1,10 @@
 # Release notes
 
-## v4.7.1 — 2026-10-31 — HIDMaestro 2.0.x allocation-free USB/IP and submit paths
+## v4.8.0 — 2026-10-31 — HIDMaestro 2.0.x allocation-free USB/IP and submit paths
 
-**English** | [简体中文](#v471--2026-10-31--同步-hidmaestro-20x-零分配-usbip-与-submit-路径)
+**English** | [简体中文](#v480--2026-10-31--同步-hidmaestro-20x-零分配-usbip-与-submit-路径)
 
-GKMD 4.7.1 takes the performance-only work issue #1 deferred: the USB/IP
+GKMD 4.8.0 takes the performance-only work issue #1 deferred: the USB/IP
 transfer, frame and control paths no longer allocate per transfer, audio URBs
 and frame buffers are pooled, and the input-section write and the submit paths
 do less work per frame.
@@ -42,9 +42,9 @@ do less work per frame.
 
 | File | Size | Notes |
 | --- | --- | --- |
-| `GKMD-v4.7.1.zip` | 25,427,247 bytes | Contains `GKMD.dll` (Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1), `LICENSE` and `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.8.0.zip` | 25,427,246 bytes | Contains `GKMD.dll` (Release build, IL, `net10.0-windows`, AnyCPU, embedded usbip-win2 0.9.8.1), `LICENSE` and `THIRD-PARTY-NOTICES.txt` |
 
-SHA-256: `78571FA1DE4CA098CE0A0BF44CDCD07E238693C0B5C25D902C5543A440BB1B33`
+SHA-256: `458620BD08D48C4B3702F9298F58342585788E6E8D01354BCD03CE149306BA9E`
 
 Produced by `dotnet build -c Release -t:PackageRelease`; Native AOT compilation
 happens in the host application (GKME), not in this library.
@@ -61,11 +61,11 @@ happens in the host application (GKME), not in this library.
 
 ---
 
-## v4.7.1 — 2026-10-31 — 同步 HIDMaestro 2.0.x 零分配 USB/IP 与 submit 路径
+## v4.8.0 — 2026-10-31 — 同步 HIDMaestro 2.0.x 零分配 USB/IP 与 submit 路径
 
-[English](#v471--2026-10-31--hidmaestro-20x-allocation-free-usbip-and-submit-paths) | **简体中文**
+[English](#v480--2026-10-31--hidmaestro-20x-allocation-free-usbip-and-submit-paths) | **简体中文**
 
-GKMD 4.7.1 接过 issue #1 中暂缓的纯性能工作：USB/IP 的传输、帧与 control
+GKMD 4.8.0 接过 issue #1 中暂缓的纯性能工作：USB/IP 的传输、帧与 control
 路径不再逐次分配，audio URB 与帧缓冲改为池化，输入 section 的写入与 submit
 路径每帧做的工作也更少。
 
@@ -97,9 +97,9 @@ GKMD 4.7.1 接过 issue #1 中暂缓的纯性能工作：USB/IP 的传输、帧�
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `GKMD-v4.7.1.zip` | 25,427,247 字节 | 内含 `GKMD.dll`（Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.8.0.zip` | 25,427,246 字节 | 内含 `GKMD.dll`（Release 构建、IL、`net10.0-windows`、AnyCPU，内嵌 usbip-win2 0.9.8.1）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt` |
 
-SHA-256：`78571FA1DE4CA098CE0A0BF44CDCD07E238693C0B5C25D902C5543A440BB1B33`
+SHA-256：`458620BD08D48C4B3702F9298F58342585788E6E8D01354BCD03CE149306BA9E`
 
 由 `dotnet build -c Release -t:PackageRelease` 生成；Native AOT 编译在宿主应用
 （GKME）中完成，而非本类库。
