@@ -4,16 +4,17 @@ using System.Threading;
 namespace GKMD.Internal.Usbip;
 
 /// <summary>Orchestrates one usbip-backend controller's lifecycle
-/// (issue #39): deploy the bundled transport if this machine does not
-/// have it yet, start the in-process server, register the emulated
-/// device, sweep any stale state a crashed prior process left in the
-/// vhci driver, then attach and hand back a handle whose disposal
-/// detaches and tears everything down in order.
+/// (issue #39): prepare the platform's USB/IP transport (install the bundled
+/// usbip-win2 on Windows, load the in-kernel <c>vhci_hcd</c> on Linux), start
+/// the in-process server, register the emulated device, sweep any stale state
+/// a crashed prior process left in the vhci driver, then attach and hand back
+/// a handle whose disposal detaches and tears everything down in order.
 ///
-/// <para>Composite personas just work. The usbip-win2 transport ships
-/// inside GKMD.Core.dll and installs itself on the first create:
-/// no separate package, no second download, nothing for a user to go
-/// find. See <see cref="UsbipDriverInstaller"/>.</para></summary>
+/// <para>Composite personas just work. On Windows the usbip-win2 transport is
+/// embedded in this assembly and deployed on request; on Linux mainline's
+/// <c>vhci_hcd</c> is loaded with one <c>modprobe</c>. Either way there is no
+/// separate package and no second download. See
+/// <see cref="UsbipDriverInstaller"/>.</para></summary>
 internal static class UsbipBackend
 {
     /// <summary>True when the transport is already installed and a

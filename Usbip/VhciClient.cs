@@ -4,6 +4,8 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 
+#if GKMD_WINDOWS
+
 namespace GKMD.Internal.Usbip;
 
 /// <summary>Talks to usbip-win2's vhci host controller through its public
@@ -38,7 +40,7 @@ namespace GKMD.Internal.Usbip;
 ///
 /// <para>Presence of the device interface doubles as backend
 /// availability detection: no usbip-win2, no interface, no backend.</para></summary>
-internal static class VhciClient
+internal static partial class VhciClient
 {
     // include/usbip/vhci.h GUID_DEVINTERFACE_USB_HOST_CONTROLLER, renamed
     // GUID_DEVINTERFACE_USBIP_VHCI in 0.9.8.1 with the same value.
@@ -420,18 +422,4 @@ internal static class VhciClient
     private static extern bool CloseHandle(IntPtr h);
 }
 
-/// <summary>Network receive path the usbip UDE driver uses for an imported
-/// device (usbip-win2 0.9.8.x <c>plugin_hardware.wsk_events</c>). Ignored
-/// on the 0.9.7.x layout, whose request has no such field.</summary>
-internal enum UsbipReceiveMode
-{
-    /// <summary>Zero-copy: the driver receives straight into the pending
-    /// URB's MDLs through WSK kernel functions; the only mode before
-    /// 0.9.8.0.</summary>
-    ZeroCopy = 0,
-
-    /// <summary>Low-latency: the driver receives through WSK event
-    /// callbacks and parses the stream from a ring buffer. Better suited
-    /// to small, high-frequency reports.</summary>
-    LowLatency = 1,
-}
+#endif

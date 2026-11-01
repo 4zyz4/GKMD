@@ -46,10 +46,11 @@ public sealed class GKController : IDisposable
     // SubmitState reuses it for every frame.
     private readonly HidReportBuilder? _reportBuilder;
     private readonly IntPtr _inputView;
-    // Named auto-reset event signaled by WriteInputFrame so the USB/IP
-    // device emulator's input pump can wake immediately instead of
-    // busy-polling. Cached at construction time alongside the view pointer.
-    private readonly IntPtr _inputEvent;
+    // Auto-reset event signaled by WriteInputFrame so the USB/IP device
+    // emulator's input pump can wake immediately instead of busy-polling.
+    // Cached at construction time alongside the view pointer. The channel
+    // is in process, so this is a managed event, not a Win32 handle.
+    private readonly AutoResetEvent? _inputEvent;
     private uint _inputSeqNo;
 
     // Output passthrough reader (rumble/haptics/FFB) — background thread
@@ -153,9 +154,9 @@ public sealed class GKController : IDisposable
 
     // Legacy companion input doorbell (perf audit 2026-07-21), retained from
     // the removed XUSB companion path: signaled per GIP-carrying frame to
-    // complete a parked WAIT_FOR_INPUT at frame arrival. Always IntPtr.Zero
-    // under the USB/IP backend.
-    private readonly IntPtr _companionInputEvent;
+    // complete a parked WAIT_FOR_INPUT at frame arrival. Always null under
+    // the USB/IP backend.
+    private readonly AutoResetEvent? _companionInputEvent;
 
     // Canonical trigger positions, resolved once (issue #34). The axisMap
     // walk (case-insensitive role compare + hex key parse) ran inside
@@ -236,7 +237,7 @@ public sealed class GKController : IDisposable
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
         _companionInputEvent = _packsGipBuffer
-            ? SharedMemoryIO.GetCompanionInputEvent(index) : IntPtr.Zero;
+            ? SharedMemoryIO.GetCompanionInputEvent(index) : null;
 
         // v1.3.5 — pre-allocate vendor-blob buffer + encoder state ONLY when
         // the profile actually arms (Sony BT post-handshake). Profiles with
@@ -713,8 +714,10 @@ public sealed class GKController : IDisposable
         byte[] buf = new byte[256];
         var ct = _outputCts.Token;
 
-        IntPtr rawEvt = SharedMemoryIO.TryOpenOutputEvent(Index);
-        AutoResetEvent? doorbell = null;
+        // The output doorbell is the device channel's own auto-reset event
+        // (see SharedMemoryIO.EnsureOutputEvent); the reader only waits on
+        // it and must never dispose it.
+        AutoResetEvent? doorbell = SharedMemoryIO.TryOpenOutputEvent(Index);
         WaitHandle[]? waitPair = null;
         int openRetryCountdown = 64;
         // Adaptive missed-signal healing (#34 audit): in event mode the
@@ -730,14 +733,10 @@ public sealed class GKController : IDisposable
         int missedSignalStrikes = 0;
         bool drainFaulted = false;
         bool lastWakeWasTimeout = false;
-        if (rawEvt != IntPtr.Zero)
+        if (doorbell != null)
         {
-            doorbell = new AutoResetEvent(false);
-            doorbell.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(rawEvt, ownsHandle: true);
             waitPair = new WaitHandle[] { ct.WaitHandle, doorbell };
         }
-        try
-        {
         while (!ct.IsCancellationRequested)
         {
             bool drainedAny = false;
@@ -875,22 +874,15 @@ public sealed class GKController : IDisposable
                     if (--openRetryCountdown <= 0)
                     {
                         openRetryCountdown = 64;
-                        IntPtr raw = SharedMemoryIO.TryOpenOutputEvent(Index);
-                        if (raw != IntPtr.Zero)
+                        doorbell = SharedMemoryIO.TryOpenOutputEvent(Index);
+                        if (doorbell != null)
                         {
-                            doorbell = new AutoResetEvent(false);
-                            doorbell.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(raw, ownsHandle: true);
                             waitPair = new WaitHandle[] { ct.WaitHandle, doorbell };
                         }
                     }
                 }
             }
             catch { break; }
-        }
-        }
-        finally
-        {
-            doorbell?.Dispose();
         }
     }
 

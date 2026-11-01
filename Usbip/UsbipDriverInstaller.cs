@@ -1,3 +1,5 @@
+#if GKMD_WINDOWS
+
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -38,7 +40,7 @@ namespace GKMD.Internal.Usbip;
 /// hardware ID, PnP re-enumerates the root hubs once during install,
 /// which momentarily interrupts USB devices. That happens once per
 /// machine, on the first composite controller ever created.</para></summary>
-internal static class UsbipDriverInstaller
+internal static partial class UsbipDriverInstaller
 {
     public const string Version = "0.9.8.1";
     private const string NoticeFile = "THIRD-PARTY-NOTICES.txt";
@@ -710,3 +712,5 @@ internal static class UsbipDriverInstaller
         };
     }
 }
+
+#endif

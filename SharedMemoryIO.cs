@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -8,29 +7,29 @@ using System.Threading;
 namespace GKMD.Internal;
 
 /// <summary>
-/// Per-controller shared-memory IPC between the elevated user-mode SDK
-/// process and the USB/IP backend. Owns the
-/// pagefile-backed Global\GKMDInput&lt;N&gt; (input) and Global\GKMDOutput&lt;N&gt;
-/// (output passthrough) named sections, plus the lock-free seqlock writer
-/// for input frames.
+/// Per-controller input/output channel between <see cref="GKController"/>
+/// and the in-process USB/IP device emulator
+/// (<c>UsbipEmulatedDevice</c>).
 ///
-/// <para>The class is currently <c>static</c> because both the SDK and the
-/// in-tree test app go through the same instance — there's only ever one
-/// per process. When we want to support multiple <see cref="GKContext"/>
-/// instances per process the static state will move onto an instance,
-/// but for now this matches how the test app's IPC code worked and lets
-/// us extract without churning the test app's call sites.</para>
+/// <para>Both ends live in the same process now that every persona is a
+/// USB/IP device: the controller writes the newest input frame, the
+/// emulated device's input pump reads it and turns it into the URB the
+/// host is waiting for, and the device publishes captured
+/// rumble/haptics/FFB/LED packets back for the controller's output poll
+/// thread. The channel is therefore a plain block of zeroed native memory
+/// plus a pair of managed auto-reset events, which keeps it portable
+/// (Windows, Linux, any architecture) and removes the named-section and
+/// named-event Win32 plumbing the old kernel driver needed.</para>
 ///
-/// <para><b>SDDL note:</b> WUDFHost runs as LocalService and lacks
-/// SeCreateGlobalPrivilege, so the kernel-side driver/companion CANNOT
-/// create Global\ named sections themselves. The test app / SDK
-/// (running elevated) pre-creates the sections with a permissive SDDL
-/// that grants LocalService full access, then the driver/companion
-/// OpenFileMappings them.</para>
+/// <para>The memory layout is unchanged from that driver-era design, so
+/// the writers and readers below stay the same seqlock code they always
+/// were: single writer, many readers, readers retry on a sequence
+/// mismatch. The static state is per process and keyed by controller
+/// index, matching the SDK's controller-index pool.</para>
 /// </summary>
 internal static class SharedMemoryIO
 {
-    // ── Layout constants — match driver/driver.h ──────────────────────────
+    // ── Layout constants ──────────────────────────────────────────────────
     //
     // GKMD_SHARED_INPUT (362 bytes, was 278 pre-v1.3.5):
     //   ULONG  SeqNo                offset 0
@@ -40,12 +39,13 @@ internal static class SharedMemoryIO
     //   ULONG  ExtendedReportSize   offset 278   ← v1.3.5: 0 = legacy, >0 = use ExtendedReportData
     //   UCHAR  ExtendedReportData[80] offset 282 ← v1.3.5: full RID-included report (Sony BT 0x31 / 0x11)
     //
-    // The driver writes EITHER legacy OR extended per frame (mode-switch),
-    // not both. SDK clears ExtendedReportSize on legacy frames so the driver
-    // doesn't reuse stale extended bytes from a prior arming.
+    // A frame carries EITHER legacy OR extended per frame (mode-switch),
+    // not both. The writer clears ExtendedReportSize on legacy frames so a
+    // previously-armed controller's stale extended bytes do not leak
+    // through.
     //
     // GKMD_SHARED_OUTPUT — RING BUFFER as of v1.1.40.
-    //   ULONG  Head                        offset 0   (monotonic; total writes by driver)
+    //   ULONG  Head                        offset 0   (monotonic; total writes)
     //   ULONG  _Reserved                   offset 4
     //   GKMD_OUTPUT_SLOT Slots[N]    offset 8
     //
@@ -78,7 +78,7 @@ internal static class SharedMemoryIO
     public const int EXTENDED_DATA_CAPACITY     = 80;
     public const int SHARED_INPUT_SIZE          = EXTENDED_DATA_OFFSET + EXTENDED_DATA_CAPACITY; // 362
 
-    // Output ring layout (must match driver/driver.h):
+    // Output ring layout:
     public const int OUTPUT_RING_SLOTS  = 64;
     public const int OUTPUT_SLOT_SIZE   = 4 + 1 + 1 + 2 + 256;     // SeqNo + Source + RID + DataSize + Data[256]
     public const int OUTPUT_HEADER_SIZE = 4 + 4;                   // Head + _Reserved
@@ -89,27 +89,10 @@ internal static class SharedMemoryIO
     public const int OUTPUT_SLOT_OFFSET_SIZE      = 6;
     public const int OUTPUT_SLOT_OFFSET_DATA      = 8;
 
-    // SDDL granting Local System, Builtin Admins, and LocalService full
-    // access plus World read. LocalService is what WUDFHost runs as.
-    private const string Sddl =
-        "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
-
-    private const uint PAGE_READWRITE = 0x04;
-    private const uint FILE_MAP_READ  = 0x02;
-    private const uint FILE_MAP_WRITE = 0x04;
-
-    // CreateEventW EVENT_MODIFY_STATE | SYNCHRONIZE — open existing named
-    // events for SetEvent and waiting from the SDK side.
-    private const uint EVENT_MODIFY_STATE        = 0x0002;
-    private const uint SYNCHRONIZE               = 0x00100000;
-
-    private static readonly Dictionary<int, IntPtr> s_inputHandles  = new();
-    private static readonly Dictionary<int, IntPtr> s_inputViews    = new();
-    private static readonly Dictionary<int, IntPtr> s_inputEvents   = new();
-    private static readonly Dictionary<int, IntPtr> s_companionInputEvents = new();
-    private static readonly Dictionary<int, IntPtr> s_outputHandles = new();
+    private static readonly Dictionary<int, IntPtr> s_inputViews  = new();
+    private static readonly Dictionary<int, AutoResetEvent> s_inputEvents = new();
     private static readonly Dictionary<int, IntPtr> s_outputViews   = new();
-    private static readonly Dictionary<int, IntPtr> s_outputEvents  = new();
+    private static readonly Dictionary<int, AutoResetEvent> s_outputEvents  = new();
 
     /// <summary>Live output-poll threads, keyed by controller index (issue
     /// #45).
@@ -187,182 +170,122 @@ internal static class SharedMemoryIO
         try { pump.Thread.Join(TimeoutScale.Apply(500)); } catch { }
     }
 
-    /// <summary>Returns the view pointer for the controller's INPUT section,
-    /// creating the section on first call. Thread-safe via per-call lock —
-    /// callers can issue concurrent EnsureInputMapping requests for distinct
+    /// <summary>Returns the view pointer for the controller's INPUT block,
+    /// creating it on first call. Thread-safe via per-call lock — callers can
+    /// issue concurrent EnsureInputMapping requests for distinct
     /// controllerIndex values without races. Idempotent for the same index.</summary>
-    public static IntPtr EnsureInputMapping(int controllerIndex)
+    public static unsafe IntPtr EnsureInputMapping(int controllerIndex)
     {
         lock (s_inputViews)
         {
             if (s_inputViews.TryGetValue(controllerIndex, out IntPtr existing))
                 return existing;
 
-            string name = $@"Global\GKMDInput{controllerIndex}";
-            (IntPtr h, IntPtr view) = CreateSection(name, SHARED_INPUT_SIZE);
+            // AllocZeroed: page-backed zeroed memory, so SeqNo starts at 0
+            // and the GIP slice stays zeros for non-Xbox profiles.
+            IntPtr view = (IntPtr)NativeMemory.AllocZeroed(SHARED_INPUT_SIZE);
 
-            // Zero-init: pagefile-backed sections start zero already, but we
-            // explicitly write SeqNo=0 so a stale section from a previous
-            // run (under the same name) doesn't carry forward a non-zero
-            // sequence number that the driver would treat as "no change".
-            // Bulk Marshal.Copy from a freshly allocated zero buffer is one
-            // P/Invoke; the prior per-byte loop was 278 P/Invokes per setup.
-            Marshal.Copy(new byte[SHARED_INPUT_SIZE], 0, view, SHARED_INPUT_SIZE);
-
-            // Companion signaling event. Auto-reset (manual_reset=FALSE), not
-            // initially set. The USB/IP device emulator's input pump waits on
-            // this with a 50ms safety timeout to replace the old 1ms busy poll.
-            // SDDL matches the section so WUDFHost (LocalService) can open it.
-            string evName = $@"Global\GKMDInputEvent{controllerIndex}";
-            IntPtr ev = CreateNamedEvent(evName);
-
-            // Companion input doorbell (perf audit 2026-07-21). The XUSB
-            // companion's WAIT_FOR_INPUT pump was purely 8 ms
-            // timer-quantized, which put a 0-8 ms (median ~4 ms) phase
-            // delay on the WGI/GameInput input path and 125 idle wakes/s
-            // per Xbox controller. A SECOND named auto-reset event (the
-            // main input event is consumed by the USB/IP device emulator's
-            // input pump, an auto-reset event cannot serve two waiters) lets the
-            // companion complete a parked WAIT_FOR_INPUT at frame
-            // arrival. Old companions never open it: timer fallback.
-            string cevName = $@"Global\GKMDCompanionInputEvent{controllerIndex}";
-            IntPtr cev = CreateNamedEvent(cevName);
-            s_companionInputEvents[controllerIndex] = cev;
-
-            s_inputHandles[controllerIndex] = h;
+            // The input pump waits on this with a timeout; the controller
+            // signals it per frame so a parked read wakes immediately.
+            // Auto-reset so a single wait consumes the signal.
             s_inputViews[controllerIndex] = view;
-            s_inputEvents[controllerIndex] = ev;
+            s_inputEvents[controllerIndex] = new AutoResetEvent(false);
             return view;
         }
     }
 
-    /// <summary>Try to open the driver-created output-ring doorbell
-    /// <c>Global\GKMDOutputEvent&lt;N&gt;</c> (issue #34). The DRIVER
-    /// creates this event (companion opens-or-creates the same name), so
-    /// open success doubles as capability detection: success means the
-    /// installed driver signals per published packet and the reader can
-    /// block on it; failure means an older driver and the caller keeps
-    /// the 8 ms poll cadence. Returns IntPtr.Zero when absent. The caller
-    /// owns the returned handle.</summary>
-    public static IntPtr TryOpenOutputEvent(int controllerIndex)
-    {
-        return OpenEventW(SYNCHRONIZE, false,
-            $@"Global\GKMDOutputEvent{controllerIndex}");
-    }
-
-    /// <summary>Companion input doorbell handle for
-    /// <c>Global\GKMDCompanionInputEvent&lt;N&gt;</c> (created in
-    /// EnsureInputMapping). IntPtr.Zero when the mapping was never
-    /// created in this process.</summary>
-    public static IntPtr GetCompanionInputEvent(int controllerIndex)
-    {
-        lock (s_inputViews)
-            return s_companionInputEvents.TryGetValue(controllerIndex, out var ev) ? ev : IntPtr.Zero;
-    }
-
-    /// <summary>Create (or return) the output-ring doorbell
-    /// <c>Global\GKMDOutputEvent&lt;N&gt;</c> from the SDK side.
-    /// The USB/IP backend (issue #39) has no external driver, so the
-    /// in-process device emulator creates it here, with the same SDDL,
-    /// BEFORE the GKController's OutputPollLoop calls
-    /// <see cref="TryOpenOutputEvent"/>, so the reader comes up in
-    /// event mode. Cached per index and closed by DestroyController.</summary>
-    public static IntPtr EnsureOutputEvent(int controllerIndex)
-    {
-        lock (s_outputViews)
-        {
-            if (s_outputEvents.TryGetValue(controllerIndex, out IntPtr existing))
-                return existing;
-            IntPtr ev = CreateNamedEvent($@"Global\GKMDOutputEvent{controllerIndex}");
-            s_outputEvents[controllerIndex] = ev;
-            return ev;
-        }
-    }
-
-    /// <summary>Open an independent SYNCHRONIZE handle to
-    /// <c>Global\GKMDInputEvent&lt;N&gt;</c> for a waiter. The handle
-    /// EnsureInputMapping caches is the writer's SetEvent handle; the
-    /// USB/IP device emulator's input pump is the auto-reset event's sole
-    /// waiter and owns the returned handle.</summary>
-    public static IntPtr OpenInputEventForWait(int controllerIndex)
-    {
-        return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, false,
-            $@"Global\GKMDInputEvent{controllerIndex}");
-    }
-
-    /// <summary>Returns the view pointer for the controller's OUTPUT section,
-    /// creating the section on first call. The backend attaches to
-    /// this section read-write to publish captured rumble/haptics/FFB/LED.</summary>
-    public static IntPtr EnsureOutputMapping(int controllerIndex)
+    /// <summary>Returns the view pointer for the controller's OUTPUT block,
+    /// creating it on first call. The device emulator attaches to this block
+    /// read-write to publish captured rumble/haptics/FFB/LED.</summary>
+    public static unsafe IntPtr EnsureOutputMapping(int controllerIndex)
     {
         lock (s_outputViews)
         {
             if (s_outputViews.TryGetValue(controllerIndex, out IntPtr existing))
                 return existing;
 
-            string name = $@"Global\GKMDOutput{controllerIndex}";
-            (IntPtr h, IntPtr view) = CreateSection(name, SHARED_OUTPUT_SIZE);
-
-            // Zero-init: pagefile sections start zero, BUT a residual kernel
-            // object from a prior SDK process (kept alive by a still-loaded
-            // backend view) may retain a non-zero SeqNo and stale Data. Without
-            // this, a fresh OutputPollLoop sees `SeqNo != lastSeq(0)` on its
-            // first sample and replays prior-session FFB as a brand-new
-            // OutputReceived packet — on repeat if a consumer process's
-            // XInput/HID handle still talks to the ghost slot.
-            // Bulk Marshal.Copy from a freshly allocated zero buffer is one
-            // P/Invoke; the prior per-byte loop was ~17K P/Invokes per setup
-            // (SHARED_OUTPUT_SIZE = 16,904 bytes).
-            Marshal.Copy(new byte[SHARED_OUTPUT_SIZE], 0, view, SHARED_OUTPUT_SIZE);
-
-            s_outputHandles[controllerIndex] = h;
+            IntPtr view = (IntPtr)NativeMemory.AllocZeroed(SHARED_OUTPUT_SIZE);
             s_outputViews[controllerIndex] = view;
             return view;
         }
     }
 
-/// <summary>Returns the signaling event handle for a controller's input
-    /// section, or <see cref="IntPtr.Zero"/> if no mapping has been created
-    /// for that index yet. Used by <see cref="GKController"/> to cache the
-    /// handle alongside the view pointer so <see cref="WriteInputFrame"/>
-    /// can signal it per frame without a dictionary lookup.</summary>
-    public static IntPtr GetInputEvent(int controllerIndex)
+    /// <summary>Create (or return) the output-ring doorbell
+    /// <c>GKMDOutputEvent&lt;N&gt;</c> (issue #39). The USB/IP backend has no
+    /// external driver: the in-process device emulator creates it here
+    /// BEFORE the GKController's OutputPollLoop asks for it, so the reader
+    /// comes up in event mode. The event object is shared by the device
+    /// (writer) and the controller (sole waiter) and is closed by
+    /// DestroyController.</summary>
+    public static AutoResetEvent EnsureOutputEvent(int controllerIndex)
     {
-        lock (s_inputViews)
+        lock (s_outputViews)
         {
-            return s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) ? ev : IntPtr.Zero;
+            if (s_outputEvents.TryGetValue(controllerIndex, out AutoResetEvent? existing))
+                return existing;
+            var ev = new AutoResetEvent(false);
+            s_outputEvents[controllerIndex] = ev;
+            return ev;
         }
     }
 
+    /// <summary>The output-ring doorbell, or null if no mapping has been
+    /// created for that index yet. Used by <see cref="GKController"/> to
+    /// block on published packets instead of polling at 8 ms.</summary>
+    public static AutoResetEvent? TryOpenOutputEvent(int controllerIndex)
+    {
+        lock (s_outputViews)
+            return s_outputEvents.TryGetValue(controllerIndex, out AutoResetEvent? ev) ? ev : null;
+    }
+
+    /// <summary>Companion input doorbell handle for
+    /// <c>GKMDCompanionInputEvent&lt;N&gt;</c>. The XUSB companion that
+    /// once consumed it is gone (every persona rides USB/IP), so this is
+    /// always null and kept only for the legacy non-USB/IP call site.</summary>
+    public static AutoResetEvent? GetCompanionInputEvent(int controllerIndex) => null;
+
+    /// <summary>Returns the signaling event for a controller's input block,
+    /// or null if no mapping has been created for that index yet. Used by
+    /// <see cref="GKController"/> to cache the event alongside the view
+    /// pointer so <see cref="WriteInputFrame"/> can signal it per frame
+    /// without a dictionary lookup.</summary>
+    public static AutoResetEvent? GetInputEvent(int controllerIndex)
+    {
+        lock (s_inputViews)
+            return s_inputEvents.TryGetValue(controllerIndex, out AutoResetEvent? ev) ? ev : null;
+    }
+
+    /// <summary>The wait side of <c>GKMDInputEvent&lt;N&gt;</c>. The block is
+    /// in process, so the pump and the writer share one auto-reset event;
+    /// the pump is its single waiter.</summary>
+    public static AutoResetEvent? OpenInputEventForWait(int controllerIndex) => GetInputEvent(controllerIndex);
+
     /// <summary>Atomic seqlock write of a new input frame. Single-writer
-    /// (the SDK consumer's input loop) → many-readers (driver + companion)
-    /// pattern is safe lock-free — readers retry on SeqNo mismatch. After
-    /// publishing the new sequence, signals <paramref name="eventHandle"/>
-    /// so the driver's worker thread can wake immediately instead of
-    /// busy-polling the section.
+    /// (the SDK consumer's input loop) → one reader (the device emulator's
+    /// input pump) pattern is safe lock-free — the reader retries on SeqNo
+    /// mismatch. After publishing the new sequence, signals
+    /// <paramref name="eventHandle"/> so the pump can wake immediately
+    /// instead of waiting out its timeout.
     ///
     /// <para><c>seqNo</c> is updated in place; the caller maintains it
     /// across frames so it survives mapping resets.</para>
     ///
-    /// <para><paramref name="eventHandle"/> may be <see cref="IntPtr.Zero"/>
-    /// if no signaling event exists (e.g. older driver that still polls
-    /// without opening the event). The SetEvent call is skipped in that
-    /// case — the write still completes normally.</para>
+    /// <para><paramref name="eventHandle"/> may be null if no signaling
+    /// event exists. The signal is skipped in that case — the write still
+    /// completes normally.</para>
     ///
     /// <para>The stores go through the view's pointer, as HIDMaestro
-    /// 2.0.0's writer does. Each Marshal.WriteInt32 and Marshal.Copy they
-    /// replace was a call the JIT does not inline, four or five a frame.
-    /// The two lanes take spans, so a caller writes its frame from where
-    /// it already is, with no copy into a buffer of its own first. The
-    /// seqlock uses one write barrier after the odd number instead of two
-    /// full fences: the payload's stores must follow the odd number
-    /// (<see cref="Volatile.WriteBarrier"/>), and the even number is a
-    /// release store, so the payload is visible before it.</para></summary>
-    public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
+    /// 2.0.0's writer does. The two lanes take spans, so a caller writes
+    /// its frame from where it already is, with no copy into a buffer of
+    /// its own first. The seqlock uses one write barrier after the odd
+    /// number instead of two full fences: the payload's stores must follow
+    /// the odd number (<see cref="Volatile.WriteBarrier"/>), and the even
+    /// number is a release store, so the payload is visible before it.</para></summary>
+    public static unsafe void WriteInputFrame(IntPtr view, AutoResetEvent? eventHandle, ref uint seqNo,
                                        ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
                                        ReadOnlySpan<byte> extendedData = default, int extendedLen = 0,
-                                       IntPtr companionEvent = default)
+                                       AutoResetEvent? companionEvent = null)
     {
         if (view == IntPtr.Zero) throw new AccessViolationException();
         byte* v = (byte*)view;
@@ -374,22 +297,19 @@ internal static class SharedMemoryIO
         Volatile.WriteBarrier();
 
         // 2. Write payload (DataSize + Data + GipData + ExtendedReport*).
-        // We don't zero the unused data tail past dataLen — backend/consumer
+        // We don't zero the unused data tail past dataLen — the reader
         // reads DataSize and uses only data[0..DataSize-1]; the tail is
-        // irrelevant. gipData is null for non-Xbox profiles (no XUSB
-        // companion bound), so the 14-byte copy is skipped entirely. The
-        // section is zero-initialized at create time, so the GIP slice
-        // stays zeros.
+        // irrelevant. gipData is null for non-Xbox profiles, so the 14-byte
+        // copy is skipped entirely. The block is zero-initialized at create
+        // time, so the GIP slice stays zeros.
         //
         // When extendedData is not empty AND extendedLen > 0, the full
         // RID-included extended report goes into ExtendedReportData and
-        // ExtendedReportSize is set. The backend branches on
-        // ExtendedReportSize > 0 and emits ExtendedReportData verbatim (no
-        // FirstInputReportId prepend). Otherwise ExtendedReportSize is
+        // ExtendedReportSize is set. Otherwise ExtendedReportSize is
         // explicitly cleared so a previously-armed controller's stale
         // extended bytes don't leak through after a legacy-mode frame.
         // The size word at 278 is not 4-byte aligned, so it takes an
-        // unaligned store as Marshal.WriteInt32 did.
+        // unaligned store.
         Unsafe.WriteUnaligned(v + 4, dataLen);
         if (dataLen > 0)
             data.Slice(dataOffset, dataLen).CopyTo(new Span<byte>(v + DATA_OFFSET, dataLen));
@@ -411,26 +331,23 @@ internal static class SharedMemoryIO
         seqNo = pending + 1;
         Volatile.Write(ref *(uint*)v, seqNo);
 
-        // 4. Wake the backend's input pump and, for a frame that carries
-        // GIP bytes, the XUSB companion. Kept out of line so a submit that
-        // writes nothing (a state block, a device with ports) pays no
-        // native-call frame.
+        // 4. Wake the input pump and, for a frame that carries GIP bytes,
+        // the XUSB companion. Kept out of line so a submit that writes
+        // nothing (a state block, a device with ports) pays no call.
         Signal(eventHandle, companionEvent, gipData != null);
     }
 
     /// <summary>The frame doorbells, once or twice a frame. Never inlined:
-    /// a method the JIT inlines a P/Invoke into sets up the native-call
-    /// frame on every entry, including calls that signal nothing.</summary>
+    /// a method the JIT inlines a call into sets up the call's frame on
+    /// every entry, including calls that signal nothing.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void Signal(IntPtr eventHandle, IntPtr companionEvent, bool hasGip)
+    private static void Signal(AutoResetEvent? eventHandle, AutoResetEvent? companionEvent, bool hasGip)
     {
         // Auto-reset event: one successful wait consumes the signal. If the
-        // backend is still processing a previous frame the signal stays
-        // latched until it returns to WaitForMultipleObjects.
-        if (eventHandle != IntPtr.Zero)
-            SetEvent(eventHandle);
-        if (companionEvent != IntPtr.Zero && hasGip)
-            SetEvent(companionEvent);
+        // pump is still processing a previous frame the signal stays
+        // latched until it returns to waiting.
+        eventHandle?.Set();
+        if (hasGip) companionEvent?.Set();
     }
 
     /// <summary>v1.1.40 ring read. Reads the next output packet at
@@ -457,7 +374,7 @@ internal static class SharedMemoryIO
         // Reader fell more than RING_SLOTS behind: oldest packets have
         // been overwritten. Skip ahead to the oldest still-readable slot
         // and continue from there. This is a real lossy edge case — if
-        // a consumer is processing significantly slower than the driver
+        // a consumer is processing significantly slower than the writer
         // is producing, the tail of the burst wins over the head.
         if (head > nextSeq + (uint)OUTPUT_RING_SLOTS - 1)
             nextSeq = head - (uint)OUTPUT_RING_SLOTS + 1;
@@ -466,12 +383,11 @@ internal static class SharedMemoryIO
         int slotBase = OUTPUT_HEADER_SIZE + slotIdx * OUTPUT_SLOT_SIZE;
 
         // Per-slot seqlock: read SeqNo, fields, then SeqNo again, and
-        // retry on mismatch. Since the audit of #34, producers RESERVE their
-        // sequence via InterlockedIncrement on Head and publish the
-        // slot's SeqNo last, so a mismatch here is either a slot whose
-        // reserving producer hasn't finished writing (retry next wake;
-        // its doorbell signal follows the publish) or a 64-lap overwrite
-        // (handled by the skip-ahead above).
+        // retry on mismatch. The writer RESERVES its sequence via an
+        // increment on Head and publishes the slot's SeqNo last, so a
+        // mismatch here is either a slot whose reserving writer hasn't
+        // finished writing (retry next wake; its doorbell signal follows
+        // the publish) or a 64-lap overwrite (handled by the skip-ahead).
         int retries = 4;
         uint slotSeqAfter = 0;
         do
@@ -490,10 +406,10 @@ internal static class SharedMemoryIO
             ushort sz = (ushort)Marshal.ReadInt16(view, slotBase + OUTPUT_SLOT_OFFSET_SIZE);
             if (sz > dataBuf.Length) sz = (ushort)dataBuf.Length;
             dataSize = sz;
-            // v1.3.0 — bulk Marshal.Copy replaces the prior per-byte
-            // Marshal.ReadByte loop. Same per-frame win as the writer side
-            // (1 P/Invoke instead of N), running on the SDK's output poll
-            // thread which fires every 8 ms for every controller.
+            // Bulk Marshal.Copy rather than a per-byte loop. Same
+            // per-frame win as the writer side, running on the SDK's
+            // output poll thread which fires every 8 ms for every
+            // controller.
             if (sz > 0)
                 Marshal.Copy(view + slotBase + OUTPUT_SLOT_OFFSET_DATA, dataBuf, 0, sz);
             Thread.MemoryBarrier();
@@ -507,9 +423,9 @@ internal static class SharedMemoryIO
         return true;
     }
 
-    /// <summary>Releases the input and output sections for a single controller.
-    /// Called when an GKController is disposed. Idempotent.</summary>
-    public static void DestroyController(int controllerIndex)
+    /// <summary>Releases the input and output blocks for a single controller.
+    /// Called when a GKController is disposed. Idempotent.</summary>
+    public static unsafe void DestroyController(int controllerIndex)
     {
         // Before any unmap: this controller's poll thread reads the output
         // view every iteration (issue #45).
@@ -517,38 +433,30 @@ internal static class SharedMemoryIO
 
         lock (s_inputViews)
         {
-            if (s_inputViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
-                UnmapViewOfFile(v);
+            if (s_inputViews.TryGetValue(controllerIndex, out IntPtr v))
+                NativeMemory.Free((void*)v);
             s_inputViews.Remove(controllerIndex);
 
-            if (s_inputHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
-                CloseHandle(h);
-            s_inputHandles.Remove(controllerIndex);
-
-            if (s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
-                CloseHandle(ev);
+            if (s_inputEvents.TryGetValue(controllerIndex, out AutoResetEvent? ev))
+                ev.Dispose();
             s_inputEvents.Remove(controllerIndex);
         }
         lock (s_outputViews)
         {
-            if (s_outputViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
-                UnmapViewOfFile(v);
+            if (s_outputViews.TryGetValue(controllerIndex, out IntPtr v))
+                NativeMemory.Free((void*)v);
             s_outputViews.Remove(controllerIndex);
 
-            if (s_outputHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
-                CloseHandle(h);
-            s_outputHandles.Remove(controllerIndex);
-
-            if (s_outputEvents.TryGetValue(controllerIndex, out IntPtr oe) && oe != IntPtr.Zero)
-                CloseHandle(oe);
+            if (s_outputEvents.TryGetValue(controllerIndex, out AutoResetEvent? oe))
+                oe.Dispose();
             s_outputEvents.Remove(controllerIndex);
         }
     }
 
-    /// <summary>Releases all input and output sections owned by the process.
+    /// <summary>Releases all input and output blocks owned by the process.
     /// Safe to call multiple times. Called on process exit and on
     /// GKContext.Dispose.</summary>
-    public static void Cleanup()
+    public static unsafe void Cleanup()
     {
         // Before any unmap: poll threads for controllers the caller has NOT
         // disposed are still dereferencing their output views (issue #45).
@@ -560,151 +468,20 @@ internal static class SharedMemoryIO
         lock (s_inputViews)
         {
             foreach (var v in s_inputViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
+                NativeMemory.Free((void*)v);
             s_inputViews.Clear();
-            foreach (var h in s_inputHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_inputHandles.Clear();
             foreach (var ev in s_inputEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
+                ev.Dispose();
             s_inputEvents.Clear();
-            foreach (var ev in s_companionInputEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
-            s_companionInputEvents.Clear();
         }
         lock (s_outputViews)
         {
             foreach (var v in s_outputViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
+                NativeMemory.Free((void*)v);
             s_outputViews.Clear();
-            foreach (var h in s_outputHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_outputHandles.Clear();
             foreach (var ev in s_outputEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
+                ev.Dispose();
             s_outputEvents.Clear();
         }
     }
-
-    // ── private helpers ───────────────────────────────────────────────────
-
-    private static (IntPtr handle, IntPtr view) CreateSection(string name, int size)
-    {
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                Sddl, 1, out IntPtr sd, IntPtr.Zero))
-            throw new Win32Exception();
-
-        SECURITY_ATTRIBUTES sa = new()
-        {
-            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            lpSecurityDescriptor = sd,
-            bInheritHandle = 0,
-        };
-        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
-        Marshal.StructureToPtr(sa, saPtr, false);
-
-        IntPtr hMap;
-        try
-        {
-            hMap = CreateFileMappingW(new IntPtr(-1), saPtr,
-                PAGE_READWRITE, 0, (uint)size, name);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(saPtr);
-            LocalFree(sd);
-        }
-
-        if (hMap == IntPtr.Zero)
-            throw new Win32Exception();
-
-        IntPtr view = MapViewOfFile(hMap, FILE_MAP_WRITE | FILE_MAP_READ,
-            0, 0, (UIntPtr)size);
-        if (view == IntPtr.Zero)
-        {
-            int err = Marshal.GetLastWin32Error();
-            CloseHandle(hMap);
-            throw new Win32Exception(err);
-        }
-        return (hMap, view);
-    }
-
-    /// <summary>Creates a named auto-reset event under the same SDDL used
-    /// for the sections so WUDFHost (LocalService) can OpenEvent it. Auto
-    /// reset so a single Wait consumes the signal; manual_reset=FALSE means
-    /// the dwFlags argument to CreateEventExW is 0 (not MANUAL_RESET).</summary>
-    private static IntPtr CreateNamedEvent(string name)
-    {
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                Sddl, 1, out IntPtr sd, IntPtr.Zero))
-            throw new Win32Exception();
-
-        SECURITY_ATTRIBUTES sa = new()
-        {
-            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            lpSecurityDescriptor = sd,
-            bInheritHandle = 0,
-        };
-        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
-        Marshal.StructureToPtr(sa, saPtr, false);
-
-        IntPtr ev;
-        try
-        {
-            // dwFlags = 0 → auto-reset, not initially set.
-            ev = CreateEventExW(saPtr, name, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(saPtr);
-            LocalFree(sd);
-        }
-
-        if (ev == IntPtr.Zero)
-            throw new Win32Exception();
-        return ev;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SECURITY_ATTRIBUTES
-    {
-        public uint nLength;
-        public IntPtr lpSecurityDescriptor;
-        public int bInheritHandle;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes,
-        uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
-        uint dwFileOffsetHigh, uint dwFileOffsetLow, UIntPtr dwNumberOfBytesToMap);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool UnmapViewOfFile(IntPtr lpBaseAddress);
-
-    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
-    private static extern bool CloseHandle(IntPtr hObject);
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        string StringSecurityDescriptor, uint StringSDRevision,
-        out IntPtr SecurityDescriptor, IntPtr SecurityDescriptorSize);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr hMem);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateEventExW(IntPtr lpEventAttributes, string lpName,
-        uint dwFlags, uint dwDesiredAccess);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr OpenEventW(uint dwDesiredAccess, bool bInheritHandle,
-        string lpName);
-
-    // The frame writer's doorbell. Nothing reads its error, so the stub
-    // neither clears nor saves the last error around it.
-    [DllImport("kernel32.dll")]
-    private static extern bool SetEvent(IntPtr hEvent);
 }

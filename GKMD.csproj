@@ -1,7 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Two builds of one assembly. The Windows build rides usbip-win2's
+         vhci host controller and carries the upstream installer for this
+         architecture; the Linux build rides the in-kernel vhci-hcd driver
+         that mainline Linux already provides (module `vhci_hcd`), so it
+         embeds no installer and needs no out-of-tree kernel module. A host
+         picks the matching build automatically through ProjectReference. -->
+    <TargetFrameworks>net10.0-windows;net10.0</TargetFrameworks>
     <OutputType>Library</OutputType>
     <AssemblyName>GKMD</AssemblyName>
     <RootNamespace>GKMD</RootNamespace>
@@ -26,25 +32,34 @@
     <DebugType>full</DebugType>
   </PropertyGroup>
 
-  <!-- One DLL per architecture: every build embeds exactly one usbip-win2
-       installer, so a host ships only the payload its machines can load.
-       The choice follows the RuntimeIdentifier when one is given
+  <!-- The Windows build is identified by this constant, so every file that
+       P/Invokes into Win32 or reads the registry is compiled only there.
+       The Linux build compiles the plain net10.0 TFM instead. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <DefineConstants>$(DefineConstants);GKMD_WINDOWS</DefineConstants>
+  </PropertyGroup>
+
+  <!-- One DLL per architecture: every Windows build embeds exactly one
+       usbip-win2 installer, so a host ships only the payload its machines
+       can load. The choice follows the RuntimeIdentifier when one is given
        (`dotnet build -r win-arm64`, `dotnet publish -r win-arm64` from a
        host), and can be set directly with -p:UsbipPayloadArch=arm64 by a
        host that sets its RID in its own project file instead of on the
-       command line. Without either, the build is the x64 one. -->
+       command line. Without either, the build is the x64 one. The Linux
+       build embeds no installer at all: mainline Linux already has the
+       vhci-hcd USB/IP driver. -->
   <PropertyGroup>
     <UsbipPayloadArch Condition="'$(UsbipPayloadArch)' == '' and '$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.ToLowerInvariant().Contains('arm64'))">arm64</UsbipPayloadArch>
     <UsbipPayloadArch Condition="'$(UsbipPayloadArch)' == ''">x64</UsbipPayloadArch>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(UsbipPayloadArch)' == 'arm64'">
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows' and '$(UsbipPayloadArch)' == 'arm64'">
     <EmbeddedResource Include="Resources\USBip-0.9.8.1-arm64.exe">
       <LogicalName>GKMD.Resources.USBip-0.9.8.1-arm64.exe</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(UsbipPayloadArch)' != 'arm64'">
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows' and '$(UsbipPayloadArch)' != 'arm64'">
     <EmbeddedResource Include="Resources\USBip-0.9.8.1-x64.exe">
       <LogicalName>GKMD.Resources.USBip-0.9.8.1-x64.exe</LogicalName>
     </EmbeddedResource>
@@ -62,20 +77,30 @@
   </Target>
 
   <ItemGroup>
+    <!-- The manual Linux smoke test under tools/ is a separate executable;
+         keep its sources out of the library build. -->
+    <Compile Remove="tools/**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="LICENSE" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
     <None Include="Resources\THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <!-- Release packaging: one zip per architecture, each built from its own
-       build so the DLL inside carries only that architecture's installer.
+       Windows build so the DLL inside carries only that architecture's
+       installer.
 
-         dotnet build -c Release -t:PackageRelease -r win-x64
-         dotnet build -c Release -t:PackageRelease -r win-arm64
+         dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+         dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
 
        Produces bin\Release\GKMD-v<version>-x64.zip and
        ...-arm64.zip, each containing GKMD.dll, LICENSE and
-       THIRD-PARTY-NOTICES.txt so the notices travel with every copy. -->
-  <Target Name="PackageRelease" DependsOnTargets="Build" Condition="'$(Configuration)' == 'Release'">
+       THIRD-PARTY-NOTICES.txt so the notices travel with every copy.
+       `-f net10.0-windows` is required because a package is one Windows
+       build; the Linux build of the same assembly is not packaged here. -->
+  <Target Name="PackageRelease" DependsOnTargets="Build"
+          Condition="'$(Configuration)' == 'Release' and '$(TargetFramework)' == 'net10.0-windows'">
     <PropertyGroup>
       <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
       <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(UsbipPayloadArch)</ReleaseStageDir>

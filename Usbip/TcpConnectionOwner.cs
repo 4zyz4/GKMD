@@ -1,3 +1,5 @@
+#if GKMD_WINDOWS
+
 using System;
 using System.Net;
 using System.Net.Sockets;
@@ -14,7 +16,7 @@ namespace GKMD.Internal.Usbip;
 /// WskSocket takes the current process for a null OwningProcess. A work item
 /// runs in the System process, PID 4, which no user-mode program can own a
 /// socket in.</summary>
-internal static class TcpConnectionOwner
+internal static partial class TcpConnectionOwner
 {
     public const int SystemProcessId = 4;
 
@@ -47,6 +49,19 @@ internal static class TcpConnectionOwner
             return Find(clientAddr, remote.Port, serverAddr, local.Port);
         }
         catch { return -1; }
+    }
+
+    /// <summary>Whether this connection may import a device. Windows has a
+    /// single legitimate importer, the kernel client owned by the System
+    /// process; the test probes that play the host controller in process own
+    /// their sockets here and are admitted only when the server opted in
+    /// (<see cref="UsbipServer.AdmitImportsFromThisProcess"/>), which another
+    /// process cannot set.</summary>
+    public static bool IsAdmitted(Socket accepted)
+    {
+        int pid = OfPeer(accepted);
+        return pid == SystemProcessId
+            || (UsbipServer.AdmitImportsFromThisProcess && pid == Environment.ProcessId);
     }
 
     // The address as MIB_TCPROW_OWNER_PID stores it, "the same format as
@@ -108,3 +123,5 @@ internal static class TcpConnectionOwner
     private static extern unsafe uint GetExtendedTcpTable(void* table, ref uint size,
         [MarshalAs(UnmanagedType.Bool)] bool order, uint af, int tableClass, uint reserved);
 }
+
+#endif

@@ -2,7 +2,24 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-GKMD is a standalone Windows virtual USB game controller engine (class library) that emulates USB devices in user mode through the virtual host controller (vHCI) of [usbip-win2](https://github.com/vadimgrn/usbip-win2), presenting a real hardware identity to the kernel-facing HID / XInput / DirectInput / SDL / Gamepad APIs.
+GKMD is a standalone virtual USB game controller engine (class library) that emulates USB devices in user mode through a virtual host controller (vHCI): [usbip-win2](https://github.com/vadimgrn/usbip-win2) on Windows, and mainline Linux's in-kernel `vhci_hcd` on Linux. Either way it presents a real hardware identity to the kernel-facing HID / XInput / DirectInput / SDL / Gamepad APIs.
+
+## Platforms
+
+| Platform | Host controller | Preparation |
+| --- | --- | --- |
+| Windows 10 / 11 (x64, ARM64) | usbip-win2 0.9.8.1 vHCI | `net10.0-windows` build; the official installer is embedded in the assembly and deployed on request (probe-only policy) |
+| Linux (mainline, 4.x+) | in-kernel `vhci_hcd` | `net10.0` build; `sudo modprobe vhci_hcd` (or `GKContext.InstallUsbipBackend`), plus root for attach |
+
+Linux needs no driver of GKMD's own and no downloaded installer: mainline ships both halves of USB/IP, and `vhci_hcd` is the virtual host controller that enumerates an imported device as a real one. GKMD performs the USB/IP import handshake itself and hands the connected socket to the kernel through `/sys/devices/platform/vhci_hcd.0/attach` (`port sockfd devid speed`), so it does not shell out to the `usbip` tool. A user who attaches by hand with `usbip --tcp-port <server port> attach -r 127.0.0.1 -b 1-N` also works: the server admits an import from any root process on its loopback port.
+
+Behaviour differences from the Windows build:
+
+- **Admission is by uid, not by System PID.** A Linux import is user-space initiated (there is no kernel client), and handing a socket to `vhci_hcd` requires root. The server reads the peer's uid from `/proc/net/tcp` and admits root or this process itself.
+- **Detach is asynchronous.** The kernel's hub thread runs the disconnect, so `UsbipBackendHandle.Dispose` polls the port until it reports `VDEV_ST_NULL` (4) instead of expecting a synchronous ioctl.
+- **There are no re-attach attempts to cancel.** When a connection drops, `vhci_hcd` disconnects the device and frees the port; `StopAttachAttempts` is a no-op.
+- **`UsbipReceiveMode` is ignored.** The kernel owns both ends of the transfer.
+- **`GKOemNameOverride` is a no-op.** Linux has no joy.cpl / DirectInput OEM-name registry to write.
 
 ## Attribution
 
@@ -28,7 +45,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Dimension | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
 | Controller creation path | Branches on `RequiresUsbipBackend`: ordinary profiles use UMDF2 + PnP, composite personas use USB/IP | **No branching; everything goes through USB/IP** (`CreateController` / `CreateControllerAt` both call `CreateUsbipController`) |
-| Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP for ordinary profiles; usbip-win2's host controller for composite personas. No kernel-mode driver | Pure USB/IP: usbip-win2 virtual host controller + vHCI, **no UMDF2 driver, no INF, no PnP device node** |
+| Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP for ordinary profiles; usbip-win2's host controller for composite personas. No kernel-mode driver | Pure USB/IP: usbip-win2 virtual host controller + vHCI on Windows, mainline's in-kernel `vhci_hcd` on Linux; **no UMDF2 driver, no INF, no PnP device node** |
 | Device node | UMDF2 path registers a root-enumerated / SWD PnP devnode and writes friendly name / ControllerIndex; composite path is a vhci USB device | No PnP devnode; device strings come directly from USB descriptors |
 | Transport installation | Since 2.0.1 the SDK embeds the unmodified `usbip2_ude.inf` / `.sys` / `.cat` for x64 and ARM64 and registers the host controller devnode itself (`InstallHostController`); it never runs usbip-win2's installer and never installs its root-hub filter, and it records what it installed | `UsbipDriverInstaller` embeds the official (Inno) installer for the build's architecture — `USBip-0.9.8.1-x64.exe` in the x64 build, `USBip-0.9.8.1-arm64.exe` in the ARM64 build — and runs it when the OS architecture calls for it |
 | usbip-win2 version | 0.9.8.1, x64 + ARM64 payloads | 0.9.8.1 installer payload, one per build (x64 / ARM64); `VhciClient` speaks the **0.9.8.1 / 0.9.8.0 / 0.9.7.x** request layouts and probes the installed driver for the one it has |
@@ -37,7 +54,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Audio engine | Composite personas carry USB Audio over USB/IP; the SDK installs the transport for them | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
 | Controller index / identity release | Lease + reservation system, identity keys, multi-program coexistence (a keyless 1.12.0 program lands at transport index 64+) | Tears down the USB/IP device first, then releases the index (avoids port reuse races during fast switching) |
 | Uninstall | `HMUninstall` / `HIDMaestroUninstall.exe` removes controllers, driver packages, certificate, registry keys and files; 2.0.3 can also remove usbip-win2 and its root-hub filter | No uninstall API or tool; the host app handles teardown (`UsbipBackend.DetachAllOwned`) |
-| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | Two builds of the same AnyCPU assembly, one per architecture; each embeds only its own usbip-win2 installer |
+| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | Three builds of the same AnyCPU assembly: Windows x64, Windows ARM64 (each embedding only its own usbip-win2 installer) and Linux (no installer payload) |
 | Diagnostic log | `DeviceOrchestrator.LogDiag` | Replaced with `Debug.WriteLine` |
 
 ### 2. Profiles and device behavior
@@ -61,9 +78,10 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Capability | Related files | Description |
 | --- | --- | --- |
 | GIP over USB/IP | `Usbip/GipProtocol.cs`, `Usbip/GipResponder.cs`, `Usbip/GipLog.cs` | Xbox One (`045E:02EA`) and Xbox Series X\|S (`045E:0B12`) are vendor-class USB devices answering the full GIP handshake (HELLO / announce / identify / status), 14-byte `gip_gamepad_pkt_input`, guide virtual key, and host commands (power / LED / rumble / identify). Xbox One starts from the real 214-byte gamepad metadata and appends the PC security opt-out as a fourth interface (keeping `INavigationController`), producing a 230-byte blob; the previous 182-byte sample metadata made `xboxgip` bugcheck on create |
-| Selectable USB/IP receive mode | `Usbip/VhciClient.cs`, `Usbip/UsbipBackend.cs` | `UsbipReceiveMode.LowLatency` (default, `wsk_events`) / `ZeroCopy` (MDL) on 0.9.8.x |
+| Selectable USB/IP receive mode (Windows) | `Usbip/VhciClient.cs`, `Usbip/UsbipBackend.cs` | `UsbipReceiveMode.LowLatency` (default, `wsk_events`) / `ZeroCopy` (MDL) on 0.9.8.x |
 | Probe-only installation | `Usbip/UsbipInstallRequiredException.cs`, `Usbip/UsbipRebootRequiredException.cs` | The library never installs a driver behind the host's back; the host UI turns "needs install / needs reboot" into a prompt |
 | Windows on Arm | `Usbip/UsbipDriverInstaller.cs`, `Resources/USBip-0.9.8.1-arm64.exe` | A separate ARM64 build of the same assembly carries the ARM64 installer. The payload is still chosen by the **OS** architecture, so an x64 host process under emulation installs the ARM64 driver — the only kind ARM64 Windows can load — and a build carrying the wrong payload reports that instead of running an installer that cannot work |
+| Linux (in-kernel `vhci_hcd`) | `Usbip/VhciClient.Linux.cs`, `Usbip/TcpConnectionOwner.Linux.cs`, `Usbip/UsbipDriverInstaller.Linux.cs` | The same engine with no extra kernel driver: the `OP_REQ_IMPORT` handshake runs in managed code and the socket is handed to mainline `vhci_hcd` through its sysfs `attach` file. `modprobe vhci_hcd` replaces the installer, `/proc/net/tcp` admission replaces the System-PID rule, and detach waits for the kernel's asynchronous disconnect |
 | Code-defined profile registry | `StaticProfileRegistry.cs` | Built-in personas are ordinary C# and carry no JSON or reflection dependency |
 | Code-side Sony handlers | `Usbip/SonyTestCommandHandler.cs`, `Usbip/UsbipEmulatedDevice.cs` | DualSense test commands (torch/telemetry, Type2 tracability, BT MAC/patch, battery voltage) and DualShock 4 `0x20` / `0x81` feature reports (`0x03030301` challenge response) |
 | High-resolution wheel | `UsbConfigurationSpec.ResolutionMultiplier` | Answers `GET/SET_REPORT(Feature, 0)` and enumerates at high resolution |
@@ -88,7 +106,7 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Dimension | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
 | Output | Class library `HIDMaestro.Core.dll` | Class library **`GKMD.dll`** |
-| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` |
+| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` (Windows) and `net10.0` (Linux), built from one project |
 | Platform | AnyCPU | AnyCPU |
 | Namespaces | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | Directory structure | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | Flattened to the root + the `Usbip/` subdirectory |
@@ -196,7 +214,7 @@ Not synced from 2.0.x because they do not apply or are outside the USB/IP runtim
 
 ```
 GKMD/
-├── GKMD.csproj                 # Class library project (net10.0-windows)
+├── GKMD.csproj                 # Class library project (net10.0-windows; net10.0)
 ├── AssemblyInfo.cs             # AssemblyVersion / InternalsVisibleTo
 ├── GKContext.cs                # Top-level entry: profile catalog + controller lifecycle
 ├── GKController.cs             # A single virtual controller
@@ -207,9 +225,12 @@ GKMD/
 ├── TimeoutScale.cs / GKLayout.cs / GKLayoutLoader.cs / ...
 ├── Usbip/                      # USB/IP backend
 │   ├── UsbipBackend.cs / UsbipServer.cs / VhciClient.cs / TcpConnectionOwner.cs
+│   ├── VhciClient.Linux.cs     # Linux vhci-hcd attach/detach/status via sysfs
+│   ├── TcpConnectionOwner.Linux.cs # /proc/net/tcp uid admission
 │   ├── UsbipEmulatedDevice.cs  # Device-side behavior (HID / GIP / Switch / vendor)
 │   ├── UsbDescriptorSet.cs / UsbConfigurationSpec.cs
-│   ├── UsbipDriverInstaller.cs # Deploy/upgrade usbip-win2
+│   ├── UsbipDriverInstaller.cs # Deploy/upgrade usbip-win2 (Windows)
+│   ├── UsbipDriverInstaller.Linux.cs # modprobe vhci_hcd (Linux)
 │   ├── UsbipInstallRequiredException.cs / UsbipRebootRequiredException.cs
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
@@ -221,21 +242,43 @@ GKMD/
 
 ## Build
 
+The project targets two frameworks. A host picks the right one automatically
+through `ProjectReference`: a `net10.0-windows` host gets the usbip-win2 build,
+a `net10.0` host (Linux) gets the in-kernel `vhci_hcd` build.
+
 ```powershell
-# x64 build: embeds the x64 usbip-win2 installer
+# Both targets (Windows + Linux), trim/AOT analyzers on
 dotnet build -c Release
 
-# ARM64 build: the RID selects the ARM64 installer and a per-RID output folder
-dotnet build -c Release -r win-arm64
+# Linux build only: no installer payload, drives mainline vhci_hcd
+dotnet build -c Release -f net10.0
+
+# x64 Windows build: embeds the x64 usbip-win2 installer
+dotnet build -c Release -f net10.0-windows
+
+# ARM64 Windows build: the RID selects the ARM64 installer and a per-RID folder
+dotnet build -c Release -f net10.0-windows -r win-arm64
 ```
 
-Both produce the same AnyCPU `GKMD.dll`; the only difference is which upstream
-installer it carries, so a host ships the build that matches its machines.
-Outputs land in `bin\Release\net10.0-windows\` (x64) and
-`bin\Release\net10.0-windows\win-arm64\` (ARM64). A host that sets its
+The Windows builds produce the same AnyCPU `GKMD.dll`; the only difference is
+which upstream installer it carries, so a host ships the build that matches its
+machines. Outputs land in `bin\Release\net10.0\` (Linux),
+`bin\Release\net10.0-windows\` (Windows x64) and
+`bin\Release\net10.0-windows\win-arm64\` (Windows ARM64). A host that sets its
 `RuntimeIdentifier` in its own project file instead of on the command line must
 forward the choice as well: `-p:UsbipPayloadArch=arm64` (the build fails on any
 value other than `x64` / `arm64`).
+
+On Linux the library attaches as root and imports from the server in-process.
+The distro's `usbip` tool can attach to the same server by hand:
+
+```bash
+sudo modprobe vhci_hcd            # or GKContext.InstallUsbipBackend()
+sudo usbip --tcp-port 37286 attach -r 127.0.0.1 -b 1-1
+```
+
+(`37286` is the first port of the server's range; a running server may hold a
+later one in `37286..37301`.)
 
 GKME integration: place this repository and the GKME repository under the same parent directory; GKME references this project via `<ProjectReference Include="..\GKMD\GKMD.csproj" />`.
 
@@ -255,6 +298,7 @@ dotnet build -c Release
 
 # 2) full Native AOT publish from a host project that references GKMD.csproj
 dotnet publish -c Release -r win-x64 -p:PublishAot=true
+dotnet publish -c Release -r linux-x64 -p:PublishAot=true
 ```
 
 GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishTrimmed>` and links GKMD that way.
@@ -265,11 +309,12 @@ Starting with v4.9.0, each [GitHub Release](../../releases) attaches one zip per
 architecture — `GKMD-v<version>-x64.zip` and `GKMD-v<version>-arm64.zip` — each
 holding that architecture's `GKMD.dll` (Release, IL, AnyCPU, one embedded
 usbip-win2 installer), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices
-travel with every copy of the binary. Build both with:
+travel with every copy of the binary. The Linux build of the same assembly is
+not packaged: it carries no installer payload. Build both with:
 
 ```powershell
-dotnet build -c Release -t:PackageRelease -r win-x64
-dotnet build -c Release -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
 ```
 
 Releases up to v4.8.0 attached a single RID-neutral `GKMD-v<version>.zip`. The

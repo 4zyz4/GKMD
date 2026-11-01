@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Manual Linux smoke test for the GKMD net10.0 build. It is not part of
+       the library build; publish it for linux-x64 from Windows and run the
+       generated run-linux-smoke.sh inside WSL or any Linux machine:
+
+         dotnet publish tools/LinuxSmokeTest/GkmdLinuxSmoke.csproj
+           -c Release -r linux-x64 (self-contained)
+
+       The test creates one controller over the in-kernel vhci_hcd, verifies
+       that the kernel enumerated it and bound usbhid, reads evdev events
+       while it submits state, then detaches and checks the port is free. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>GkmdLinuxSmoke</AssemblyName>
+    <RootNamespace>GkmdLinuxSmoke</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\GKMD.csproj" />
+  </ItemGroup>
+
+</Project>

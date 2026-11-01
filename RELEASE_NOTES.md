@@ -1,5 +1,173 @@
 # Release notes
 
+## Unreleased — Linux support (in-kernel `vhci_hcd`)
+
+**English** | [简体中文](#未发布--linux-支持内核-vhci_hcd)
+
+This change adds Linux support as a second target framework of the same
+assembly. Linux needs no driver of GKMD's own: mainline already ships both
+halves of USB/IP, and the in-kernel `vhci_hcd` is the virtual host controller
+that enumerates an imported device as a real one. The only preparation is
+loading the module (`modprobe vhci_hcd`), plus root for attach.
+
+### Highlights
+
+- **Multi-targeting** — `GKMD.csproj` now builds `net10.0-windows` (the
+  existing usbip-win2 backend, `GKMD_WINDOWS` define, embedded installer) and
+  `net10.0` (Linux). A host picks the right build through `ProjectReference`,
+  so no source or API change is needed in GKME or any other consumer.
+- **Managed attach through sysfs** — `VhciClient.Linux.cs` connects to the
+  in-process server, performs the `OP_REQ_IMPORT` handshake itself, and hands
+  the connected socket to the kernel by writing `port sockfd devid speed` to
+  `/sys/devices/platform/vhci_hcd.0/attach`. Detach, status and the
+  `/var/run/vhci_hcd/port<N>` location records match the `usbip` tool, so
+  location-based detach and the stale sweep work unchanged. `O_NONBLOCK` is
+  cleared with `fcntl` before the handoff because the kernel client expects a
+  blocking socket.
+- **`modprobe` replaces the installer** — `UsbipDriverInstaller.Linux.cs` keeps
+  the same API (`EnsureInstalled`, `Install`, `IsInstalled`,
+  `BundledArchitecture`). `EnsureInstalled` only probes and throws
+  `UsbipInstallRequiredException` when `vhci_hcd` is absent; `Install` runs
+  `modprobe vhci_hcd` directly when root and through `pkexec` for an
+  interactive, non-root install. There is no versioned package, so no upgrade
+  or reboot path exists and `BundledArchitecture` is always null.
+- **uid-based admission** — Linux imports are user-space initiated, so there is
+  no System-process socket to check. `TcpConnectionOwner.Linux.cs` reads the
+  peer's uid from `/proc/net/tcp` (IPv4 address as host-order hex, port as
+  plain hex) and the server admits root or this process's own uid.
+- **Asynchronous detach** — the kernel's hub thread runs the disconnect, so
+  `UsbipBackendHandle.Dispose` polls the port until it reports
+  `VDEV_ST_NULL` (4). There are no re-attach attempts to cancel, so
+  `StopAttachAttempts` is a no-op.
+- **Port 0 is a real port** — Linux's global vhci numbering starts at 0
+  (Windows starts at 1), so `VhciClient.Detach` treats only a negative value
+  as "every port", and `FindLocation` returns -1 when nothing matches. Both
+  are internal and only visible to `InternalsVisibleTo("GKME")`.
+- **Portable in-process channel** — `SharedMemoryIO` no longer uses named
+  sections or named Win32 events: both ends are always in one process now, so
+  it is a block of `NativeMemory.AllocZeroed` plus managed `AutoResetEvent`s.
+  This removes the last Win32 dependency from the frame path and works
+  identically on Windows and Linux.
+- **Windows unchanged** — the `net10.0-windows` build is the same engine as
+  4.9.0; the Linux-specific files are compiled only into the `net10.0` build.
+
+### Compatibility
+
+- No public API or profile format change; controller personas are unchanged.
+- Windows: works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or
+  0.9.8.1**, x64 and ARM64; the bytes on the wire and in the shared input
+  section are unchanged.
+- Linux: any mainline kernel with `vhci_hcd` (USB/IP host controller); the
+  distro's `usbip` tool can attach to the same server by hand with
+  `--tcp-port <server port>`.
+- `GKOemNameOverride` is a no-op on Linux: joystick OEM labels come from a
+  Windows registry database with no Linux equivalent.
+- Verified end-to-end on WSL2 (Ubuntu, kernel
+  `6.6.87.2-microsoft-standard-WSL2`): the DualShock 4 and Switch Pro personas
+  enumerated through `vhci_hcd`, `usbhid` bound their HID interface (and
+  `snd-usb-audio` the DualShock 4 audio interfaces), submitted state produced
+  evdev axis and button events, detach returned every port to `VDEV_ST_NULL`,
+  and two concurrent processes attached on ports 0 and 1 without interfering.
+  `tools/LinuxSmokeTest` reproduces this test.
+
+### Build / verify
+
+```powershell
+dotnet build -c Release                        # both targets, 0 warnings
+dotnet build -c Release -f net10.0             # Linux build only
+dotnet build -c Release -f net10.0-windows     # Windows x64 build
+```
+
+### Known limitations
+
+- Linux attach requires root; there is no unprivileged helper.
+- `UsbipReceiveMode` is Windows-only and ignored by the Linux build.
+- The Linux build is not a release zip: it carries no installer payload, so
+  the packaged artifacts remain the Windows x64 / ARM64 zips.
+- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
+  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
+
+---
+
+## 未发布 — Linux 支持（内核 `vhci_hcd`）
+
+[English](#unreleased--linux-support-in-kernel-vhci_hcd) | **简体中文**
+
+本次改动以「同一程序集的第二个 TargetFramework」的方式支持 Linux。Linux
+**不需要 GKMD 自己的驱动**：主线内核已自带 USB/IP 两端，内核中的 `vhci_hcd`
+就是把导入设备枚举成真实设备的虚拟主机控制器。唯一的准备工作是加载模块
+（`modprobe vhci_hcd`），以及 attach 所需的 root 权限。
+
+### 亮点
+
+- **多目标构建** —— `GKMD.csproj` 现在同时构建 `net10.0-windows`（原有
+  usbip-win2 后端、`GKMD_WINDOWS` 宏、内嵌安装器）与 `net10.0`（Linux）。
+  宿主通过 `ProjectReference` 自动选择对应构建，GKME 或其它调用方无需改源码
+  或 API。
+- **通过 sysfs 的托管 attach** —— `VhciClient.Linux.cs` 连接进程内 server，
+  自己在托管代码中完成 `OP_REQ_IMPORT` 握手，再把已连接的 socket 以
+  `port sockfd devid speed` 写入
+  `/sys/devices/platform/vhci_hcd.0/attach` 交给内核。detach、status 以及
+  `/var/run/vhci_hcd/port<N>` location 记录都与 `usbip` 工具一致，因此按
+  location 拆除与死设备清扫无需改动。交棒前用 `fcntl` 清除 `O_NONBLOCK`，
+  因为内核客户端要求阻塞 socket。
+- **用 `modprobe` 取代安装器** —— `UsbipDriverInstaller.Linux.cs` 保持相同
+  API（`EnsureInstalled`、`Install`、`IsInstalled`、`BundledArchitecture`）。
+  `EnsureInstalled` 只探测，`vhci_hcd` 缺失时抛
+  `UsbipInstallRequiredException`；`Install` 在已是 root 时直接执行
+  `modprobe vhci_hcd`，非 root 的交互式安装则经 `pkexec` 提权。Linux 没有
+  带版本的驱动包，因此没有升级/重启路径，`BundledArchitecture` 恒为 null。
+- **按 uid 准入** —— Linux 的导入由用户态发起，不存在 System 进程的 socket。
+  `TcpConnectionOwner.Linux.cs` 从 `/proc/net/tcp` 读取对端 uid（IPv4 地址为
+  host 序十六进制，端口为普通十六进制），server 放行 root 或本进程自身。
+- **异步 detach** —— 断开由内核 hub 线程执行，`UsbipBackendHandle.Dispose`
+  轮询端口直到状态为 `VDEV_ST_NULL`（4）。Linux 没有 re-attach attempts
+  需要取消，`StopAttachAttempts` 为空操作。
+- **端口 0 是真实端口** —— Linux 的 vhci 全局端口号从 0 开始（Windows 从 1
+  开始），因此 `VhciClient.Detach` 只在参数为负时表示「全部端口」，
+  `FindLocation` 在未找到时返回 -1。两者都是内部 API，仅通过
+  `InternalsVisibleTo("GKME")` 可见。
+- **可移植的进程内通道** —— `SharedMemoryIO` 不再使用命名 section 或命名
+  Win32 event：两端现在总在同一进程内，因此改为 `NativeMemory.AllocZeroed`
+  加托管 `AutoResetEvent`。帧路径上的最后一处 Win32 依赖被移除，Windows 与
+  Linux 行为一致。
+- **Windows 行为不变** —— `net10.0-windows` 构建与 4.9.0 是同一套引擎；
+  Linux 专用文件只会编译进 `net10.0` 构建。
+
+### 兼容性
+
+- 无公开 API 或 profile 格式变化；各手柄人格不变。
+- Windows：兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**，x64 与
+  ARM64 均可；线上字节与共享输入 section 的字节不变。
+- Linux：任意带 `vhci_hcd`（USB/IP 主机控制器）的主线内核；发行版自带的
+  `usbip` 工具也可以用 `--tcp-port <server 端口>` 手动连接到同一个 server。
+- `GKOemNameOverride` 在 Linux 上为空操作：手柄 OEM 名称来自 Windows 注册表
+  数据库，Linux 没有对应物。
+- 已在 WSL2（Ubuntu，内核 `6.6.87.2-microsoft-standard-WSL2`）上完成端到端
+  验证：DualShock 4 与 Switch Pro 人格经 `vhci_hcd` 完成枚举，`usbhid` 绑定其
+  HID 接口（DualShock 4 的音频接口由 `snd-usb-audio` 绑定），提交的状态产生了
+  evdev 轴 / 按键事件，detach 后所有端口回到 `VDEV_ST_NULL`，两个进程并发
+  attach 分别落在端口 0 和 1 且互不干扰。测试可用 `tools/LinuxSmokeTest` 复现。
+
+### 构建 / 验证
+
+```powershell
+dotnet build -c Release                        # 两个目标，0 警告
+dotnet build -c Release -f net10.0             # 仅 Linux 构建
+dotnet build -c Release -f net10.0-windows     # Windows x64 构建
+```
+
+### 已知限制
+
+- Linux 的 attach 需要 root，没有非特权 helper。
+- `UsbipReceiveMode` 仅适用于 Windows，Linux 构建忽略它。
+- Linux 构建不作为发布 zip：它不携带安装器载荷，发布产物仍是 Windows
+  x64 / ARM64 两个 zip。
+- layout 序列化 / 反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT
+  宿主中，`GKLayout*` 类型须由宿主保留。
+
+---
+
 ## v4.9.0 — 2026-11-01 — Windows on Arm (per-architecture builds)
 
 **English** | [简体中文](#v490--2026-11-01--windows-on-arm-按架构构建)

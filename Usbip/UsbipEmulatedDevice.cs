@@ -87,8 +87,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private byte _resolutionMultiplierValue;
     private readonly IntPtr _inputView;
     private readonly IntPtr _outputView;
-    private readonly IntPtr _outputEvent;
-    private IntPtr _inputWaitEvent;
+    private readonly AutoResetEvent _outputEvent;
+    private AutoResetEvent? _inputWaitEvent;
     private readonly Thread _inputThread;
     private volatile bool _stop;
     private int _disposed;
@@ -307,8 +307,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             try
             {
-                if (_inputWaitEvent != IntPtr.Zero)
-                    WaitForSingleObject(_inputWaitEvent, 500);
+                if (_inputWaitEvent != null)
+                    _inputWaitEvent.WaitOne(500);
                 else
                     Thread.Sleep(4);
                 if (_stop) break;
@@ -486,8 +486,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             try
             {
-                if (_inputWaitEvent != IntPtr.Zero)
-                    WaitForSingleObject(_inputWaitEvent, 8);
+                if (_inputWaitEvent != null)
+                    _inputWaitEvent.WaitOne(8);
                 else
                     Thread.Sleep(8);
                 if (_stop) break;
@@ -637,8 +637,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             try
             {
-                if (_inputWaitEvent != IntPtr.Zero)
-                    WaitForSingleObject(_inputWaitEvent, 15);
+                if (_inputWaitEvent != null)
+                    _inputWaitEvent.WaitOne(15);
                 else
                     Thread.Sleep(15);
                 if (_stop) break;
@@ -985,7 +985,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 Volatile.Write(ref *(int*)(v + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), (int)newSeq);
             }
         }
-        if (_outputEvent != IntPtr.Zero) SetEvent(_outputEvent);
+        _outputEvent.Set();
     }
 
     // 鈹€鈹€ URB dispatch (called on the connection reader thread) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -1970,24 +1970,13 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         // when it wakes. Wake it now, so Dispose does not wait out its
         // timeout. A second Dispose returns above, and a dispose racing the
         // host's detach releases the device first.
-        if (_inputWaitEvent != IntPtr.Zero) SetEvent(_inputWaitEvent);
+        _inputWaitEvent?.Set();
         Audio?.Dispose();
         try { _inputThread.Join(600); } catch { }
-        if (_inputWaitEvent != IntPtr.Zero)
-        {
-            CloseHandle(_inputWaitEvent);
-            _inputWaitEvent = IntPtr.Zero;
-        }
+        // The event itself belongs to SharedMemoryIO's channel and is
+        // disposed by DestroyController after this device is gone.
+        _inputWaitEvent = null;
     }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr handle, uint ms);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetEvent(IntPtr h);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr h);
 }
 
 

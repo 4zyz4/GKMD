@@ -2,9 +2,40 @@
 
 [English](README.md) | **简体中文**
 
-GKMD 是一个独立的 Windows 虚拟 USB 游戏控制器引擎（class library），通过
-[usbip-win2](https://github.com/vadimgrn/usbip-win2) 的虚拟主机控制器（vHCI）在用户态
-模拟 USB 设备，向内核上层的 HID / XInput / DirectInput / SDL / Gamepad API 呈现真实硬件身份。
+GKMD 是一个独立的虚拟 USB 游戏控制器引擎（class library），通过虚拟主机控制器（vHCI）
+在用户态模拟 USB 设备：Windows 上使用
+[usbip-win2](https://github.com/vadimgrn/usbip-win2)，Linux 上使用主线内核自带的
+`vhci_hcd`。两者都会向内核上层的 HID / XInput / DirectInput / SDL / Gamepad API
+呈现真实硬件身份。
+
+## 平台支持
+
+| 平台 | 主机控制器 | 准备步骤 |
+| --- | --- | --- |
+| Windows 10 / 11（x64、ARM64） | usbip-win2 0.9.8.1 vHCI | `net10.0-windows` 构建；官方安装器内嵌在程序集里，按需部署（仅探测策略） |
+| Linux（主线内核 4.x+） | 内核自带 `vhci_hcd` | `net10.0` 构建；`sudo modprobe vhci_hcd`（或调用 `GKContext.InstallUsbipBackend`），attach 需要 root |
+
+Linux **无需 GKMD 自己的驱动，也无需下载安装器**：主线内核自带 USB/IP 两端，
+`vhci_hcd` 就是把导入设备枚举成真实设备的虚拟主机控制器。GKMD 自己在托管代码里完成
+USB/IP 的 import 握手，再把已连接的 socket 通过
+`/sys/devices/platform/vhci_hcd.0/attach`（`port sockfd devid speed`）交给内核，
+因此不需要调用 `usbip` 工具。用户手动执行
+`usbip --tcp-port <server 端口> attach -r 127.0.0.1 -b 1-N` 也能工作：
+server 允许任意 root 进程从 loopback 端口导入。
+
+与 Windows 构建的行为差异：
+
+- **准入按 uid，而不是 System PID。** Linux 的导入由用户态发起（不存在内核客户端），
+  并且把 socket 交给 `vhci_hcd` 需要 root。server 从 `/proc/net/tcp` 读取对端 uid，
+  放行 root 或本进程自身。
+- **Detach 是异步的。** 断开由内核 hub 线程执行，因此
+  `UsbipBackendHandle.Dispose` 轮询端口直到状态回到 `VDEV_ST_NULL`（4），而不是期待
+  同步 ioctl。
+- **没有需要取消的 re-attach attempts。** 连接断开后 `vhci_hcd` 会断开设备并释放端口，
+  `StopAttachAttempts` 为空操作。
+- **`UsbipReceiveMode` 被忽略。** 传输两端都由内核掌管。
+- **`GKOemNameOverride` 为空操作。** Linux 没有 joy.cpl / DirectInput 的 OEM 名称
+  注册表可写。
 
 ## 来源声明
 
@@ -37,7 +68,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 维度 | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
 | 控制器创建路径 | 按 `RequiresUsbipBackend` 分支：普通 profile 走 UMDF2 + PnP，复合 persona 走 USB/IP | **无分支，全部走 USB/IP**（`CreateController` / `CreateControllerAt` 均调用 `CreateUsbipController`） |
-| 驱动模型 | 普通 profile 使用 UMDF2 用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP；复合 persona 使用 usbip-win2 虚拟主机控制器。无内核态驱动 | 纯 USB/IP：usbip-win2 虚拟主机控制器 + vHCI，**无 UMDF2 驱动、无 INF、无 PnP 设备节点** |
+| 驱动模型 | 普通 profile 使用 UMDF2 用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP；复合 persona 使用 usbip-win2 虚拟主机控制器。无内核态驱动 | 纯 USB/IP：Windows 上为 usbip-win2 虚拟主机控制器 + vHCI，Linux 上为主线内核自带的 `vhci_hcd`，**无 UMDF2 驱动、无 INF、无 PnP 设备节点** |
 | 设备节点 | UMDF2 路径创建 root-enumerated / SWD PnP devnode，写入 friendly name / ControllerIndex；复合路径是 vhci USB 设备 | 无 PnP devnode，设备字符串直接来自 USB 描述符 |
 | 传输安装 | 2.0.1 起直接嵌入未修改的 x64 / ARM64 `usbip2_ude.inf` / `.sys` / `.cat`，由 SDK 自己注册 host controller devnode（`InstallHostController`）；不运行 usbip-win2 安装器，不安装其 root-hub filter，并记录安装内容 | `UsbipDriverInstaller` 按构建架构嵌入官方（Inno）安装器——x64 构建带 `USBip-0.9.8.1-x64.exe`，ARM64 构建带 `USBip-0.9.8.1-arm64.exe`——并在 OS 架构匹配时运行 |
 | usbip-win2 版本 | 0.9.8.1，x64 + ARM64 载荷 | 0.9.8.1 安装器载荷，每个构建一份（x64 / ARM64）；`VhciClient` 支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，并探测已安装驱动实际支持的布局 |
@@ -46,7 +77,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 音频引擎 | 复合 persona 通过 USB/IP 承载 USB Audio，SDK 自动安装传输 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
 | 控制器索引 / 身份释放 | lease + reservation 系统、identity key、多程序并存（无 key 的 1.12.0 程序落在 transport index 64 以上） | 先拆 USB/IP 设备再释放索引（避免快速切换时端口复用竞争） |
 | 卸载 | `HMUninstall` / `HIDMaestroUninstall.exe` 移除控制器、驱动包、证书、注册表与文件；2.0.3 还可移除 usbip-win2 及其 root-hub filter | 无卸载 API / 工具；由宿主 App 自行清理（`UsbipBackend.DetachAllOwned`） |
-| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | 同一个 AnyCPU 程序集按架构构建两次，每个构建只内嵌自己那份 usbip-win2 安装器 |
+| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | 同一个 AnyCPU 程序集构建三次：Windows x64、Windows ARM64（各自只内嵌自己那份 usbip-win2 安装器）与 Linux（无安装器载荷） |
 | 诊断日志 | `DeviceOrchestrator.LogDiag` | 改为 `Debug.WriteLine` |
 
 ### 2. Profile 与设备行为
@@ -70,9 +101,10 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 功能 | 相关文件 | 说明 |
 | --- | --- | --- |
 | USB/IP 上的 GIP | `Usbip/GipProtocol.cs`、`Usbip/GipResponder.cs`、`Usbip/GipLog.cs` | Xbox One（`045E:02EA`）与 Xbox Series X\|S（`045E:0B12`）作为厂商类 USB 设备响应完整 GIP 握手（HELLO / announce / identify / status）、14 字节 `gip_gamepad_pkt_input`、guide 虚拟键，以及主机命令（power / LED / rumble / identify）。Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），形成 230 字节 blob；此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
-| 可选的 USB/IP 接收模式 | `Usbip/VhciClient.cs`、`Usbip/UsbipBackend.cs` | 0.9.8.x 上支持 `UsbipReceiveMode.LowLatency`（默认，`wsk_events`）/ `ZeroCopy`（MDL） |
+| 可选的 USB/IP 接收模式（Windows） | `Usbip/VhciClient.cs`、`Usbip/UsbipBackend.cs` | 0.9.8.x 上支持 `UsbipReceiveMode.LowLatency`（默认，`wsk_events`）/ `ZeroCopy`（MDL） |
 | 仅探测的安装策略 | `Usbip/UsbipInstallRequiredException.cs`、`Usbip/UsbipRebootRequiredException.cs` | 库不会在宿主意料之外安装驱动；宿主 UI 可将「需安装 / 需重启」转成提示 |
 | Windows on Arm | `Usbip/UsbipDriverInstaller.cs`、`Resources/USBip-0.9.8.1-arm64.exe` | 同一程序集的 ARM64 构建携带 ARM64 安装器。载荷仍按 **OS** 架构选择：在模拟层运行的 x64 宿主进程也会装 ARM64 驱动（ARM64 Windows 只能加载 ARM64 内核驱动）；若构建带的载荷与机器不匹配，会直接报错，而不是运行一个注定失败的安装器 |
+| Linux（内核 `vhci_hcd`） | `Usbip/VhciClient.Linux.cs`、`Usbip/TcpConnectionOwner.Linux.cs`、`Usbip/UsbipDriverInstaller.Linux.cs` | 同一套引擎，无需额外内核驱动：`OP_REQ_IMPORT` 握手在托管代码中完成，socket 通过 sysfs `attach` 交给主线 `vhci_hcd`。`modprobe vhci_hcd` 取代安装器，`/proc/net/tcp` 准入取代 System PID 规则，detach 会等待内核的异步断开 |
 | 代码定义的 profile 注册表 | `StaticProfileRegistry.cs` | 内建 persona 就是普通 C# 代码，不依赖 JSON 或反射 |
 | 代码侧 Sony 处理器 | `Usbip/SonyTestCommandHandler.cs`、`Usbip/UsbipEmulatedDevice.cs` | DualSense 测试指令（torch/telemetry、Type2 tracability、BT MAC/patch、电池电压）与 DualShock 4 `0x20` / `0x81` feature report（`0x03030301` challenge response） |
 | 高分辨率滚轮 | `UsbConfigurationSpec.ResolutionMultiplier` | 应答 `GET/SET_REPORT(Feature, 0)`，枚举时默认高分辨率 |
@@ -97,7 +129,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 维度 | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
 | 产物 | 类库 `HIDMaestro.Core.dll` | 类库 **`GKMD.dll`** |
-| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` |
+| TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows`（Windows）与 `net10.0`（Linux），由同一个工程构建 |
 | Platform | AnyCPU | AnyCPU |
 | 命名空间 | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | 目录结构 | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | 扁平化到根目录 + `Usbip/` 子目录 |
@@ -205,7 +237,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 
 ```
 GKMD/
-├── GKMD.csproj                 # 类库工程（net10.0-windows）
+├── GKMD.csproj                 # 类库工程（net10.0-windows; net10.0）
 ├── AssemblyInfo.cs             # AssemblyVersion / InternalsVisibleTo
 ├── GKContext.cs                # 顶层入口：profile 目录 + 控制器生命周期
 ├── GKController.cs             # 单个虚拟控制器
@@ -216,9 +248,12 @@ GKMD/
 ├── TimeoutScale.cs / GKLayout.cs / GKLayoutLoader.cs / ...
 ├── Usbip/                      # USB/IP 后端
 │   ├── UsbipBackend.cs / UsbipServer.cs / VhciClient.cs / TcpConnectionOwner.cs
+│   ├── VhciClient.Linux.cs     # Linux 下通过 sysfs 完成 vhci-hcd attach/detach/status
+│   ├── TcpConnectionOwner.Linux.cs # 基于 /proc/net/tcp 的 uid 准入
 │   ├── UsbipEmulatedDevice.cs  # 设备端行为（HID / GIP / Switch / vendor）
 │   ├── UsbDescriptorSet.cs / UsbConfigurationSpec.cs
-│   ├── UsbipDriverInstaller.cs # 部署/升级 usbip-win2
+│   ├── UsbipDriverInstaller.cs # 部署/升级 usbip-win2（Windows）
+│   ├── UsbipDriverInstaller.Linux.cs # modprobe vhci_hcd（Linux）
 │   ├── UsbipInstallRequiredException.cs / UsbipRebootRequiredException.cs
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
@@ -230,20 +265,41 @@ GKMD/
 
 ## 构建
 
+本工程面向两个 TargetFramework。宿主通过 `ProjectReference` 自动选择对应的构建：
+`net10.0-windows` 宿主得到 usbip-win2 构建，`net10.0` 宿主（Linux）得到内核
+`vhci_hcd` 构建。
+
 ```powershell
-# x64 构建：内嵌 x64 的 usbip-win2 安装器
+# 同时构建两个目标（Windows + Linux），并开启 trim/AOT 分析器
 dotnet build -c Release
 
-# ARM64 构建：RID 会选择 ARM64 安装器，并使用按 RID 区分的输出目录
-dotnet build -c Release -r win-arm64
+# 仅 Linux 构建：无安装器载荷，驱动主线 vhci_hcd
+dotnet build -c Release -f net10.0
+
+# x64 Windows 构建：内嵌 x64 的 usbip-win2 安装器
+dotnet build -c Release -f net10.0-windows
+
+# ARM64 Windows 构建：RID 会选择 ARM64 安装器，并使用按 RID 区分的输出目录
+dotnet build -c Release -f net10.0-windows -r win-arm64
 ```
 
-两次构建产出同一个 AnyCPU `GKMD.dll`，唯一差别是内嵌哪一份上游安装器，宿主
-按目标机器选择对应构建即可。输出分别位于
-`bin\Release\net10.0-windows\`（x64）与
-`bin\Release\net10.0-windows\win-arm64\`（ARM64）。若宿主在自己的工程文件里
-（而不是命令行）设置 `RuntimeIdentifier`，需要同时转发该选择：
+Windows 的两次构建产出同一个 AnyCPU `GKMD.dll`，唯一差别是内嵌哪一份上游安装器，
+宿主按目标机器选择对应构建即可。输出分别位于 `bin\Release\net10.0\`（Linux）、
+`bin\Release\net10.0-windows\`（Windows x64）与
+`bin\Release\net10.0-windows\win-arm64\`（Windows ARM64）。若宿主在自己的工程
+文件里（而不是命令行）设置 `RuntimeIdentifier`，需要同时转发该选择：
 `-p:UsbipPayloadArch=arm64`（取值只允许 `x64` / `arm64`，否则构建报错）。
+
+Linux 上类库以 root 身份 attach，并在进程内完成 import。发行版自带的 `usbip`
+工具也可以手动连接到同一个 server：
+
+```bash
+sudo modprobe vhci_hcd            # 或调用 GKContext.InstallUsbipBackend()
+sudo usbip --tcp-port 37286 attach -r 127.0.0.1 -b 1-1
+```
+
+（`37286` 是 server 端口段的第一个端口；正在运行的 server 可能占用了
+`37286..37301` 中靠后的一个。）
 
 GKME 集成方式：把本仓库与 GKME 仓库放在同一父目录下，GKME 通过
 `<ProjectReference Include="..\GKMD\GKMD.csproj" />` 引用本工程。
@@ -272,6 +328,7 @@ dotnet build -c Release
 
 # 2) 在引用 GKMD.csproj 的宿主工程里做完整的 Native AOT 发布
 dotnet publish -c Release -r win-x64 -p:PublishAot=true
+dotnet publish -c Release -r linux-x64 -p:PublishAot=true
 ```
 
 GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishTrimmed>`
@@ -282,12 +339,12 @@ GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishT
 自 v4.9.0 起，每个 [GitHub Release](../../releases) 按架构各附带一个 zip ——
 `GKMD-v<版本>-x64.zip` 与 `GKMD-v<版本>-arm64.zip` —— 各自内含该架构的
 `GKMD.dll`（Release、IL、AnyCPU，仅内嵌一份 usbip-win2 安装器）、`LICENSE`
-与 `THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。用以下命令
-同时生成两个包：
+与 `THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。同一程序集的
+Linux 构建不打包：它不携带安装器载荷。用以下命令同时生成两个包：
 
 ```powershell
-dotnet build -c Release -t:PackageRelease -r win-x64
-dotnet build -c Release -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
 ```
 
 v4.8.0 及更早的版本只附带一个 RID 无关的 `GKMD-v<版本>.zip`。变更日志见

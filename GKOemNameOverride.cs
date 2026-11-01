@@ -32,6 +32,11 @@ namespace GKMD;
 /// <see cref="RecoverOrphans"/> replay the record to restore all three
 /// targets independently.</para>
 ///
+/// <para><b>Linux:</b> there is no DirectInput / joy.cpl OEM-name database to
+/// write, so every method is a no-op there and <see cref="ListActive"/>
+/// returns an empty list. The API stays available so a cross-platform consumer
+/// compiles and runs unchanged.</para>
+///
 /// <para><b>Usage pattern:</b></para>
 /// <code>
 /// // Once at consumer startup, before creating any virtuals:

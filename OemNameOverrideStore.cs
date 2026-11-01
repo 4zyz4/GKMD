@@ -1,11 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+
+#if GKMD_WINDOWS
 using Microsoft.Win32;
 
 #pragma warning disable CA1416 // 平台兼容性检查：此类仅用于 Windows
+#endif
 
 namespace GKMD.Internal;
+
+#if GKMD_WINDOWS
 
 /// <summary>
 /// Crash-safe registry state machine for joy.cpl / DirectInput OEM-name
@@ -325,3 +330,30 @@ internal static class OemNameOverrideStore
     private static string PendingEntryPath(string vidPid) =>
         $@"{PendingRoot}\{vidPid}";
 }
+
+#else
+
+/// <summary>No-op counterpart of the Windows OEM-name store.
+///
+/// <para>The label this class overrides on Windows comes from DirectInput's
+/// registry tables, which have no Linux equivalent: there is no joy.cpl and
+/// no shared OEM-name database to write. The calls stay in the public API so
+/// a cross-platform consumer compiles and runs unchanged, but on Linux they
+/// change nothing and <see cref="ListActive"/> always reports an empty
+/// set.</para></summary>
+internal static class OemNameOverrideStore
+{
+    public static void Claim(ushort vid, ushort pid, string label)
+    {
+        if (label is null) throw new ArgumentNullException(nameof(label));
+    }
+
+    public static void Release(ushort vid, ushort pid) { }
+
+    public static int RecoverOrphans() => 0;
+
+    public static IReadOnlyList<(string VidPid, string? OriginalOemName, bool OriginalExisted)> ListActive() =>
+        Array.Empty<(string, string?, bool)>();
+}
+
+#endif

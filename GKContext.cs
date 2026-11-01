@@ -16,13 +16,16 @@ namespace GKMD;
 /// owns. Multiple contexts in one process are supported but not encouraged
 /// (they share the same controller-index pool).</para>
 ///
-/// <para><b>Backend:</b> every controller is presented through the bundled
-/// USB/IP transport (usbip-win2).</para>
+/// <para><b>Backend:</b> every controller is presented through a USB/IP
+/// virtual host controller: usbip-win2 on Windows, the in-kernel
+/// <c>vhci_hcd</c> on Linux. Both are driven from managed code, so no
+/// user-mode driver package or PnP device node is involved.</para>
 ///
 /// <para><b>Admin requirement:</b> Windows requires SeLoadDriverPrivilege
 /// (admin) for the one-time USB/IP transport install and for attaching each
-/// virtual controller. This matches every other virtual-controller library
-/// on Windows (ViGEmBus, vJoy, etc.).</para>
+/// virtual controller. Linux requires root for the same attach (the vhci
+/// sysfs files are root-writable) and for loading <c>vhci_hcd</c>, matching
+/// every other virtual-controller library on either platform.</para>
 /// </summary>
 public sealed class GKContext : IDisposable
 {
@@ -43,43 +46,54 @@ public sealed class GKContext : IDisposable
     //  Transport lifecycle
     // ════════════════════════════════════════════════════════════════════
 
-    /// <summary>True if the USB/IP transport (usbip-win2's virtual host
-    /// controller) is already installed on this machine. Does not require
-    /// admin to check.</summary>
+    /// <summary>True if the platform's USB/IP virtual host controller
+    /// (usbip-win2 on Windows, the in-kernel <c>vhci_hcd</c> on Linux) is
+    /// already present on this machine. Does not require admin to check.</summary>
     public bool IsDriverInstalled => Internal.Usbip.UsbipBackend.IsAvailable;
 
     /// <summary>Issue #39: true when the USB transport that composite
-    /// personas ride (usbip-win2's virtual host controller) is already
-    /// installed on this machine. Pure presence probe: requires no admin and
-    /// installs nothing.</summary>
+    /// personas ride is already available on this machine. Pure presence
+    /// probe: requires no admin and installs nothing.</summary>
     public static bool IsUsbipBackendAvailable => Internal.Usbip.UsbipBackend.IsAvailable;
 
-    /// <summary>Issue #39: install/upgrade the bundled USB transport now.
-    /// Runs the installer silently (no series of prompts) and is the
-    /// programmatic counterpart of the UI's install button. Idempotent,
-    /// requires elevation, and reports progress through
-    /// <paramref name="progress"/>.</summary>
+    /// <summary>Issue #39: install/upgrade the USB transport now. On Windows
+    /// this runs the bundled installer silently (no series of prompts); on
+    /// Linux it loads <c>vhci_hcd</c> through <c>modprobe</c> (through
+    /// <c>pkexec</c> when this process is not root). Programmatic counterpart
+    /// of the UI's install button. Idempotent, requires elevation, and reports
+    /// progress through <paramref name="progress"/>.</summary>
     public static void InstallUsbipBackend(Action<string>? progress = null)
     {
+#if GKMD_WINDOWS
         var result = Internal.Usbip.UsbipDriverInstaller.Install(progress, interactive: false);
+#else
+        // Linux has no silent installer: loading the module needs root, and a
+        // non-root process has to go through pkexec's authorisation dialog.
+        // That dialog is the Linux equivalent of the Windows install prompt,
+        // not a wizard, so an otherwise programmatic install may raise it.
+        var result = Internal.Usbip.UsbipDriverInstaller.Install(progress, interactive: true);
+#endif
         if (result != Internal.Usbip.UsbipInstallResult.Success)
             throw new InvalidOperationException(
                 result == Internal.Usbip.UsbipInstallResult.RebootRequired
-                    ? "usbip-win2 was installed but a reboot is required before it can be used."
-                    : "The usbip-win2 install did not complete.");
+                    ? "The USB/IP transport was installed but a reboot is required before it can be used."
+                    : "The USB/IP transport install did not complete.");
     }
 
-    /// <summary>Ensure the bundled USB/IP transport is present and at this
-    /// build's interface. Idempotent. Installing now requires the user's
-    /// explicit action, so this does not run the installer itself: when the
-    /// transport is missing or too old it throws
+    /// <summary>Ensure the platform's USB/IP transport is usable. Idempotent.
+    /// Installing now requires the user's explicit action, so this does not
+    /// run the installer itself: on Windows, when the usbip-win2 transport is
+    /// missing or too old, it throws
     /// <see cref="Internal.Usbip.UsbipInstallRequiredException"/> (and
     /// <see cref="Internal.Usbip.UsbipRebootRequiredException"/> after an
-    /// upgrade that only a reboot will load), which a UI turns into a prompt.
+    /// upgrade that only a reboot will load); on Linux it throws
+    /// <see cref="Internal.Usbip.UsbipInstallRequiredException"/> when
+    /// <c>vhci_hcd</c> is not loaded. A UI turns those into a prompt.
     /// Pair it with <see cref="InstallUsbipBackend"/> when the caller wants
     /// to install programmatically.</summary>
-    /// <exception cref="UnauthorizedAccessException">Thrown if the calling
-    /// process is not elevated.</exception>
+    /// <exception cref="Internal.Usbip.UsbipInstallRequiredException">Thrown
+    /// when the transport is not ready; installing it is the caller's next
+    /// step.</exception>
     public void InstallDriver()
     {
         ThrowIfDisposed();

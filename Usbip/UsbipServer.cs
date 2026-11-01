@@ -58,7 +58,8 @@ internal sealed class UsbipServer : IDisposable
     /// loopback in process own their sockets in this process. Set, it
     /// admits a connection this process owns as it admits the host
     /// controller's. A program in another process cannot set it, and it
-    /// admits no connection another process owns.</summary>
+    /// admits no connection another process owns. Windows only: the Linux
+    /// uid rule already admits this process.</summary>
     internal static volatile bool AdmitImportsFromThisProcess;
 
     public int Port { get; }
@@ -164,11 +165,11 @@ internal sealed class UsbipServer : IDisposable
             // Any local program can connect. Each connection holds a thread
             // only until its handshake deadline, and past MaxHandshakes in
             // their handshake at once a new one is closed here, without a
-            // thread, unless the host controller opened it. The driver
-            // connects once per attach it runs, and runs them one at a time
-            // (vhci_ioctl.cpp, the sequential default queue), so a flood
-            // from user mode never turns an import away.
-            if (Interlocked.Increment(ref _handshakes) > MaxHandshakes && !IsHostController(client))
+            // thread, unless it is an admitted importer. The host
+            // controller's client connects once per attach it runs, and runs
+            // them one at a time (vhci_ioctl.cpp, the sequential default
+            // queue), so a flood from user mode never turns an import away.
+            if (Interlocked.Increment(ref _handshakes) > MaxHandshakes && !IsAdmittedPeer(client))
             {
                 Interlocked.Decrement(ref _handshakes);
                 try { client.Close(); } catch { }
@@ -181,18 +182,15 @@ internal sealed class UsbipServer : IDisposable
         }
     }
 
-    /// <summary>Whether the host controller opened this connection: its
-    /// client end is owned by the System process. Only that connection may
-    /// import a device, since an import carries the device's input, a
-    /// keyboard persona's typed keys included, and an import from anywhere
-    /// else would also turn the host controller's own away ST_DEV_BUSY.
-    /// </summary>
-    private static bool IsHostController(Socket client)
-    {
-        int pid = TcpConnectionOwner.OfPeer(client);
-        return pid == TcpConnectionOwner.SystemProcessId
-            || (AdmitImportsFromThisProcess && pid == Environment.ProcessId);
-    }
+    /// <summary>Whether this connection may import a device, which decides
+    /// both the flood guard above and the import reply below. An import
+    /// carries the device's input, a keyboard persona's typed keys included,
+    /// so only the platform's legitimate importer is admitted: on Windows
+    /// the kernel client's System-process socket, on Linux a root process's
+    /// socket (see <see cref="TcpConnectionOwner"/>). A refused import would
+    /// also turn another program's import away ST_DEV_BUSY, so the check
+    /// happens before the bus id is looked up.</summary>
+    private static bool IsAdmittedPeer(Socket client) => TcpConnectionOwner.IsAdmitted(client);
 
     private UsbipEmulatedDevice? Find(string busid)
     {
@@ -298,7 +296,7 @@ internal sealed class UsbipServer : IDisposable
                 string busid = UsbipProtocol.ReadFixedUtf8(busidBuf);
 
                 Span<byte> reply = stackalloc byte[8 + UsbipProtocol.UsbipUsbDeviceSize];
-                if (!IsHostController(_socket))
+                if (!IsAdmittedPeer(_socket))
                 {
                     // ST_NA, before the bus id is looked up, so the answer
                     // says nothing about what this server exports.

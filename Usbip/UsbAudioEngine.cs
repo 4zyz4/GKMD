@@ -56,8 +56,15 @@ internal sealed class UsbAudioEngine : IDisposable
     private readonly List<PendingIso> _pending = new();
     private readonly Thread _thread;
     private readonly AutoResetEvent _wake = new(false);
+#if GKMD_WINDOWS
+    // High-resolution waitable timer plus the wake event, waited together so
+    // an isochronous completion lands within ~200 µs of its frame. Linux
+    // has no user-mode equivalent (timerfd needs a file descriptor and a
+    // poll loop); the pump there waits on _wake for the remaining
+    // milliseconds and spins the last fraction.
     private readonly IntPtr _timer;
     private readonly IntPtr[] _waitPair = new IntPtr[2];
+#endif
     private volatile bool _stop;
 
     private readonly IsoCompletion _complete;
@@ -213,12 +220,14 @@ internal sealed class UsbAudioEngine : IDisposable
             _controlRange[(ctl.UnitId, 2, 0)] = (ctl.VolumeMinRaw, ctl.VolumeMaxRaw, ctl.VolumeResRaw);
         }
 
+#if GKMD_WINDOWS
         _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (_timer == IntPtr.Zero) // pre-1803 fallback; still functional, just coarser
             _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero, 0, TIMER_ALL_ACCESS);
         _waitPair[0] = _timer;
         _waitPair[1] = _wake.SafeWaitHandle.DangerousGetHandle();
+#endif
 
         _thread = new Thread(PumpLoop)
         {
@@ -662,6 +671,7 @@ internal sealed class UsbAudioEngine : IDisposable
             {
                 // Land ~200 µs early on the timer, close the rest spinning.
                 long timerTicks = remaining - (long)(200 * TicksPerUs);
+#if GKMD_WINDOWS
                 if (timerTicks > 0 && _timer != IntPtr.Zero)
                 {
                     long due = -(timerTicks * 10_000_000L / Stopwatch.Frequency); // relative 100 ns units
@@ -674,6 +684,17 @@ internal sealed class UsbAudioEngine : IDisposable
                         _wake.WaitOne(1);
                     }
                 }
+#else
+                if (timerTicks > 0)
+                {
+                    // Whole milliseconds of the remaining budget, less the
+                    // part the spin below closes. Never wait past the due
+                    // time, and wake at once for a new, earlier submit.
+                    long msEarly = timerTicks / TicksPerMs;
+                    if (msEarly > 0) _wake.WaitOne((int)Math.Min(msEarly, 250));
+                    else _wake.WaitOne(0);
+                }
+#endif
                 while (Stopwatch.GetTimestamp() < nextDue && !_stop)
                 {
                     if (nextDue - Stopwatch.GetTimestamp() > (long)(500 * TicksPerUs))
@@ -765,10 +786,13 @@ internal sealed class UsbAudioEngine : IDisposable
             try { _thread.Join(500); } catch { }
         if (events != null && Thread.CurrentThread != events)
             try { events.Join(500); } catch { }
+#if GKMD_WINDOWS
         if (_timer != IntPtr.Zero) CloseHandle(_timer);
+#endif
         _wake.Dispose();
     }
 
+#if GKMD_WINDOWS
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
     private const uint TIMER_ALL_ACCESS = 0x1F0003;
 
@@ -784,4 +808,5 @@ internal sealed class UsbAudioEngine : IDisposable
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr h);
+#endif
 }
