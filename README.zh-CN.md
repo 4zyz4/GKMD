@@ -294,8 +294,18 @@ dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 
 - NativeAOT 不支持跨操作系统编译。两个 Linux RID 必须在 Linux 上构建
   （例如 WSL 内）；Windows RID 必须在 Windows 上构建。
-- Windows ARM64 需要 Visual Studio 的 **MSVC ARM64/ARM64EC 生成工具**
-  （`Microsoft.VisualStudio.Component.VC.Tools.ARM64`）。
+- Windows ARM64 需要 Visual Studio 的 **MSVC ARM64/ARM64EC 生成工具**组件。
+  VS 2026 的组件 ID 会跟随工具集版本（例如
+  `Microsoft.VisualStudio.Component.VC.14.44.17.14.ARM64`，而不是旧版的
+  `...VC.Tools.ARM64`）。如果 ARM64 链接器只装在较旧工具集里，显式指向它：
+
+  ```powershell
+  $msvc = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.44.35207"
+  $sdk  = "C:\Program Files (x86)\Windows Kits\10"
+  $env:PATH = "$msvc\bin\Hostx64\arm64;$env:PATH"
+  $env:LIB  = "$msvc\lib\arm64;$sdk\Lib\10.0.26100.0\um\arm64;$sdk\Lib\10.0.26100.0\ucrt\arm64;$env:LIB"
+  dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64 -p:IlcUseEnvironmentalTools=true
+  ```
 - 在 x64 Linux 上构建 Linux ARM64 需要 `aarch64-linux-gnu-objcopy`
   （binutils 交叉包），并传 `-p:ObjCopyName=aarch64-linux-gnu-objcopy`。
 

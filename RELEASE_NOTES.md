@@ -119,9 +119,11 @@ dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 
 Cross-compilation constraints: NativeAOT cannot cross operating systems, so
 the Linux RIDs are built on Linux (for example WSL). Windows ARM64 needs the
-**MSVC ARM64/ARM64EC build tools** component
-(`Microsoft.VisualStudio.Component.VC.Tools.ARM64`). Linux ARM64 on an x64
-host needs `aarch64-linux-gnu-objcopy` and
+**MSVC ARM64/ARM64EC build tools** component; on VS 2026 its ID follows the
+toolset version (for example `...VC.14.44.17.14.ARM64`). If the ARM64 linker
+is only in an older toolset, set `PATH`/`LIB` to that toolset and pass
+`-p:IlcUseEnvironmentalTools=true`. Linux ARM64 on an x64 host needs
+`aarch64-linux-gnu-objcopy` and
 `-p:ObjCopyName=aarch64-linux-gnu-objcopy`.
 
 ### Known limitations
@@ -243,9 +245,11 @@ dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 ```
 
 交叉编译限制：NativeAOT 不支持跨操作系统编译，因此 Linux RID 在 Linux 上
-构建（例如 WSL）。Windows ARM64 需要 **MSVC ARM64/ARM64EC 生成工具**组件
-（`Microsoft.VisualStudio.Component.VC.Tools.ARM64`）。在 x64 主机上构建
-Linux ARM64 需要 `aarch64-linux-gnu-objcopy`，并传
+构建（例如 WSL）。Windows ARM64 需要 **MSVC ARM64/ARM64EC 生成工具**组件；
+VS 2026 的组件 ID 会跟随工具集版本（例如
+`...VC.14.44.17.14.ARM64`）。如果 ARM64 链接器只装在较旧工具集里，把
+`PATH`/`LIB` 指向该工具集，并传 `-p:IlcUseEnvironmentalTools=true`。在 x64
+主机上构建 Linux ARM64 需要 `aarch64-linux-gnu-objcopy`，并传
 `-p:ObjCopyName=aarch64-linux-gnu-objcopy`。
 
 ### 已知限制

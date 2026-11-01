@@ -273,7 +273,18 @@ Cross-compilation constraints:
 - NativeAOT cannot cross operating systems. The two Linux RIDs must be built
   on Linux (for example inside WSL); Windows RIDs must be built on Windows.
 - Windows ARM64 needs the **MSVC ARM64/ARM64EC build tools** component in
-  Visual Studio (`Microsoft.VisualStudio.Component.VC.Tools.ARM64`).
+  Visual Studio. The component ID follows the toolset version on VS 2026 (for
+  example `Microsoft.VisualStudio.Component.VC.14.44.17.14.ARM64`, not the
+  older `...VC.Tools.ARM64`). If the ARM64 linker lives in an older toolset
+  than the default one, point the build at it explicitly:
+
+  ```powershell
+  $msvc = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.44.35207"
+  $sdk  = "C:\Program Files (x86)\Windows Kits\10"
+  $env:PATH = "$msvc\bin\Hostx64\arm64;$env:PATH"
+  $env:LIB  = "$msvc\lib\arm64;$sdk\Lib\10.0.26100.0\um\arm64;$sdk\Lib\10.0.26100.0\ucrt\arm64;$env:LIB"
+  dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64 -p:IlcUseEnvironmentalTools=true
+  ```
 - Linux ARM64 on an x64 Linux host needs `aarch64-linux-gnu-objcopy` (the
   binutils cross package) and `-p:ObjCopyName=aarch64-linux-gnu-objcopy`.
 
