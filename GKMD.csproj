@@ -87,24 +87,25 @@
     <None Include="Resources\THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <!-- Release packaging: one zip per architecture, each built from its own
-       Windows build so the DLL inside carries only that architecture's
-       installer.
+  <!-- Release packaging: one zip per artifact. The two Windows builds each
+       carry their architecture's usbip-win2 installer; the Linux build is the
+       net10.0 assembly and carries no installer payload.
 
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+         dotnet build -c Release -f net10.0 -t:PackageRelease
 
-       Produces bin\Release\GKMD-v<version>-x64.zip and
-       ...-arm64.zip, each containing GKMD.dll, LICENSE and
-       THIRD-PARTY-NOTICES.txt so the notices travel with every copy.
-       `-f net10.0-windows` is required because a package is one Windows
-       build; the Linux build of the same assembly is not packaged here. -->
+       Produces bin\Release\GKMD-v<version>-x64.zip, ...-arm64.zip and
+       ...-linux.zip, each containing GKMD.dll, LICENSE and
+       THIRD-PARTY-NOTICES.txt so the notices travel with every copy. -->
   <Target Name="PackageRelease" DependsOnTargets="Build"
-          Condition="'$(Configuration)' == 'Release' and '$(TargetFramework)' == 'net10.0-windows'">
+          Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
-      <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(UsbipPayloadArch)</ReleaseStageDir>
-      <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion)-$(UsbipPayloadArch).zip</ReleaseZipPath>
+      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0'">linux</ReleaseSuffix>
+      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0-windows'">$(UsbipPayloadArch)</ReleaseSuffix>
+      <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix)</ReleaseStageDir>
+      <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix).zip</ReleaseZipPath>
     </PropertyGroup>
     <RemoveDir Directories="$(ReleaseStageDir)" />
     <MakeDir Directories="$(ReleaseStageDir)" />

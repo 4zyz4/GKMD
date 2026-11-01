@@ -1,21 +1,22 @@
 # Release notes
 
-## Unreleased — Linux support (in-kernel `vhci_hcd`)
+## v4.9.0 — 2026-11-01 — Linux support and Windows on Arm
 
-**English** | [简体中文](#未发布--linux-支持内核-vhci_hcd)
+**English** | [简体中文](#v490--2026-11-01--linux-支持与-windows-on-arm)
 
-This change adds Linux support as a second target framework of the same
-assembly. Linux needs no driver of GKMD's own: mainline already ships both
-halves of USB/IP, and the in-kernel `vhci_hcd` is the virtual host controller
-that enumerates an imported device as a real one. The only preparation is
-loading the module (`modprobe vhci_hcd`), plus root for attach.
+GKMD 4.9.0 adds Linux support and Windows on Arm support to the same AnyCPU
+assembly. There are three builds: Windows x64 and Windows ARM64, each embedding
+exactly one official usbip-win2 0.9.8.1 installer, and Linux, which rides
+mainline's in-kernel `vhci_hcd` and needs no driver of GKMD's own.
 
 ### Highlights
 
-- **Multi-targeting** — `GKMD.csproj` now builds `net10.0-windows` (the
-  existing usbip-win2 backend, `GKMD_WINDOWS` define, embedded installer) and
-  `net10.0` (Linux). A host picks the right build through `ProjectReference`,
-  so no source or API change is needed in GKME or any other consumer.
+#### Linux (in-kernel `vhci_hcd`)
+
+- **Multi-targeting** — `GKMD.csproj` now builds `net10.0-windows` (usbip-win2,
+  `GKMD_WINDOWS` define, embedded installer) and `net10.0` (Linux). A host picks
+  the right build through `ProjectReference`, so no source or API change is
+  needed in GKME or any other consumer.
 - **Managed attach through sysfs** — `VhciClient.Linux.cs` connects to the
   in-process server, performs the `OP_REQ_IMPORT` handshake itself, and hands
   the connected socket to the kernel by writing `port sockfd devid speed` to
@@ -28,156 +29,33 @@ loading the module (`modprobe vhci_hcd`), plus root for attach.
   the same API (`EnsureInstalled`, `Install`, `IsInstalled`,
   `BundledArchitecture`). `EnsureInstalled` only probes and throws
   `UsbipInstallRequiredException` when `vhci_hcd` is absent; `Install` runs
-  `modprobe vhci_hcd` directly when root and through `pkexec` for an
-  interactive, non-root install. There is no versioned package, so no upgrade
-  or reboot path exists and `BundledArchitecture` is always null.
+  `modprobe vhci-hcd` directly when root and through `pkexec` for an
+  interactive, non-root install.
 - **uid-based admission** — Linux imports are user-space initiated, so there is
   no System-process socket to check. `TcpConnectionOwner.Linux.cs` reads the
-  peer's uid from `/proc/net/tcp` (IPv4 address as host-order hex, port as
-  plain hex) and the server admits root or this process's own uid.
+  peer's uid from `/proc/net/tcp` and the server admits root or this process's
+  own uid.
 - **Asynchronous detach** — the kernel's hub thread runs the disconnect, so
-  `UsbipBackendHandle.Dispose` polls the port until it reports
-  `VDEV_ST_NULL` (4). There are no re-attach attempts to cancel, so
+  detach waits (bounded) for the port to report `VDEV_ST_NULL` (4) instead of
+  expecting a synchronous ioctl. There are no re-attach attempts to cancel, so
   `StopAttachAttempts` is a no-op.
 - **Port 0 is a real port** — Linux's global vhci numbering starts at 0
-  (Windows starts at 1), so `VhciClient.Detach` treats only a negative value
-  as "every port", and `FindLocation` returns -1 when nothing matches. Both
-  are internal and only visible to `InternalsVisibleTo("GKME")`.
+  (Windows starts at 1), so `VhciClient.Detach` treats only a negative value as
+  "every port", and `FindLocation` returns -1 when nothing matches.
 - **Portable in-process channel** — `SharedMemoryIO` no longer uses named
   sections or named Win32 events: both ends are always in one process now, so
   it is a block of `NativeMemory.AllocZeroed` plus managed `AutoResetEvent`s.
   This removes the last Win32 dependency from the frame path and works
   identically on Windows and Linux.
-- **Windows unchanged** — the `net10.0-windows` build is the same engine as
-  4.9.0; the Linux-specific files are compiled only into the `net10.0` build.
-
-### Compatibility
-
-- No public API or profile format change; controller personas are unchanged.
-- Windows: works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or
-  0.9.8.1**, x64 and ARM64; the bytes on the wire and in the shared input
-  section are unchanged.
-- Linux: any mainline kernel with `vhci_hcd` (USB/IP host controller); the
-  distro's `usbip` tool can attach to the same server by hand with
-  `--tcp-port <server port>`.
-- `GKOemNameOverride` is a no-op on Linux: joystick OEM labels come from a
-  Windows registry database with no Linux equivalent.
-- Verified end-to-end on WSL2 (Ubuntu, kernel
-  `6.6.87.2-microsoft-standard-WSL2`): the DualShock 4 and Switch Pro personas
+- **Verified on WSL2** — on Ubuntu with kernel
+  `6.6.87.2-microsoft-standard-WSL2`, the DualShock 4 and Switch Pro personas
   enumerated through `vhci_hcd`, `usbhid` bound their HID interface (and
   `snd-usb-audio` the DualShock 4 audio interfaces), submitted state produced
   evdev axis and button events, detach returned every port to `VDEV_ST_NULL`,
   and two concurrent processes attached on ports 0 and 1 without interfering.
   `tools/LinuxSmokeTest` reproduces this test.
 
-### Build / verify
-
-```powershell
-dotnet build -c Release                        # both targets, 0 warnings
-dotnet build -c Release -f net10.0             # Linux build only
-dotnet build -c Release -f net10.0-windows     # Windows x64 build
-```
-
-### Known limitations
-
-- Linux attach requires root; there is no unprivileged helper.
-- `UsbipReceiveMode` is Windows-only and ignored by the Linux build.
-- The Linux build is not a release zip: it carries no installer payload, so
-  the packaged artifacts remain the Windows x64 / ARM64 zips.
-- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
-  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
-
----
-
-## 未发布 — Linux 支持（内核 `vhci_hcd`）
-
-[English](#unreleased--linux-support-in-kernel-vhci_hcd) | **简体中文**
-
-本次改动以「同一程序集的第二个 TargetFramework」的方式支持 Linux。Linux
-**不需要 GKMD 自己的驱动**：主线内核已自带 USB/IP 两端，内核中的 `vhci_hcd`
-就是把导入设备枚举成真实设备的虚拟主机控制器。唯一的准备工作是加载模块
-（`modprobe vhci_hcd`），以及 attach 所需的 root 权限。
-
-### 亮点
-
-- **多目标构建** —— `GKMD.csproj` 现在同时构建 `net10.0-windows`（原有
-  usbip-win2 后端、`GKMD_WINDOWS` 宏、内嵌安装器）与 `net10.0`（Linux）。
-  宿主通过 `ProjectReference` 自动选择对应构建，GKME 或其它调用方无需改源码
-  或 API。
-- **通过 sysfs 的托管 attach** —— `VhciClient.Linux.cs` 连接进程内 server，
-  自己在托管代码中完成 `OP_REQ_IMPORT` 握手，再把已连接的 socket 以
-  `port sockfd devid speed` 写入
-  `/sys/devices/platform/vhci_hcd.0/attach` 交给内核。detach、status 以及
-  `/var/run/vhci_hcd/port<N>` location 记录都与 `usbip` 工具一致，因此按
-  location 拆除与死设备清扫无需改动。交棒前用 `fcntl` 清除 `O_NONBLOCK`，
-  因为内核客户端要求阻塞 socket。
-- **用 `modprobe` 取代安装器** —— `UsbipDriverInstaller.Linux.cs` 保持相同
-  API（`EnsureInstalled`、`Install`、`IsInstalled`、`BundledArchitecture`）。
-  `EnsureInstalled` 只探测，`vhci_hcd` 缺失时抛
-  `UsbipInstallRequiredException`；`Install` 在已是 root 时直接执行
-  `modprobe vhci_hcd`，非 root 的交互式安装则经 `pkexec` 提权。Linux 没有
-  带版本的驱动包，因此没有升级/重启路径，`BundledArchitecture` 恒为 null。
-- **按 uid 准入** —— Linux 的导入由用户态发起，不存在 System 进程的 socket。
-  `TcpConnectionOwner.Linux.cs` 从 `/proc/net/tcp` 读取对端 uid（IPv4 地址为
-  host 序十六进制，端口为普通十六进制），server 放行 root 或本进程自身。
-- **异步 detach** —— 断开由内核 hub 线程执行，`UsbipBackendHandle.Dispose`
-  轮询端口直到状态为 `VDEV_ST_NULL`（4）。Linux 没有 re-attach attempts
-  需要取消，`StopAttachAttempts` 为空操作。
-- **端口 0 是真实端口** —— Linux 的 vhci 全局端口号从 0 开始（Windows 从 1
-  开始），因此 `VhciClient.Detach` 只在参数为负时表示「全部端口」，
-  `FindLocation` 在未找到时返回 -1。两者都是内部 API，仅通过
-  `InternalsVisibleTo("GKME")` 可见。
-- **可移植的进程内通道** —— `SharedMemoryIO` 不再使用命名 section 或命名
-  Win32 event：两端现在总在同一进程内，因此改为 `NativeMemory.AllocZeroed`
-  加托管 `AutoResetEvent`。帧路径上的最后一处 Win32 依赖被移除，Windows 与
-  Linux 行为一致。
-- **Windows 行为不变** —— `net10.0-windows` 构建与 4.9.0 是同一套引擎；
-  Linux 专用文件只会编译进 `net10.0` 构建。
-
-### 兼容性
-
-- 无公开 API 或 profile 格式变化；各手柄人格不变。
-- Windows：兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**，x64 与
-  ARM64 均可；线上字节与共享输入 section 的字节不变。
-- Linux：任意带 `vhci_hcd`（USB/IP 主机控制器）的主线内核；发行版自带的
-  `usbip` 工具也可以用 `--tcp-port <server 端口>` 手动连接到同一个 server。
-- `GKOemNameOverride` 在 Linux 上为空操作：手柄 OEM 名称来自 Windows 注册表
-  数据库，Linux 没有对应物。
-- 已在 WSL2（Ubuntu，内核 `6.6.87.2-microsoft-standard-WSL2`）上完成端到端
-  验证：DualShock 4 与 Switch Pro 人格经 `vhci_hcd` 完成枚举，`usbhid` 绑定其
-  HID 接口（DualShock 4 的音频接口由 `snd-usb-audio` 绑定），提交的状态产生了
-  evdev 轴 / 按键事件，detach 后所有端口回到 `VDEV_ST_NULL`，两个进程并发
-  attach 分别落在端口 0 和 1 且互不干扰。测试可用 `tools/LinuxSmokeTest` 复现。
-
-### 构建 / 验证
-
-```powershell
-dotnet build -c Release                        # 两个目标，0 警告
-dotnet build -c Release -f net10.0             # 仅 Linux 构建
-dotnet build -c Release -f net10.0-windows     # Windows x64 构建
-```
-
-### 已知限制
-
-- Linux 的 attach 需要 root，没有非特权 helper。
-- `UsbipReceiveMode` 仅适用于 Windows，Linux 构建忽略它。
-- Linux 构建不作为发布 zip：它不携带安装器载荷，发布产物仍是 Windows
-  x64 / ARM64 两个 zip。
-- layout 序列化 / 反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT
-  宿主中，`GKLayout*` 类型须由宿主保留。
-
----
-
-## v4.9.0 — 2026-11-01 — Windows on Arm (per-architecture builds)
-
-**English** | [简体中文](#v490--2026-11-01--windows-on-arm-按架构构建)
-
-GKMD 4.9.0 adds Windows on Arm support as a second build of the same assembly.
-Each build embeds exactly one official usbip-win2 0.9.8.1 installer — the x64
-build the x64 one, the ARM64 build the ARM64 one — so a host ships only the
-payload its machines can load.
-
-### Highlights
+#### Windows on Arm
 
 - **ARM64 payload** — `Resources/USBip-0.9.8.1-arm64.exe` is the upstream
   release asset, unmodified (19,060,408 bytes, SHA-256
@@ -202,8 +80,8 @@ payload its machines can load.
   the release API and is checked after extraction; a mismatch still deletes the
   file and throws instead of running it. Extraction uses a per-architecture
   temp directory (`%TEMP%\GKMD_usbip_0.9.8.1_arm64`).
-- **Nothing else changed** — the vhci IOCTL layouts in `VhciClient` contain no
-  pointer-sized fields, so the 0.9.8.1 ARM64 driver speaks the same
+- **vHCI layouts unchanged** — the IOCTL structs contain no pointer-sized
+  fields, so the 0.9.8.1 ARM64 driver speaks the same
   `0.9.8.1 / 0.9.8.0 / 0.9.7.x` request layouts and the existing probe still
   discovers the installed one. `pnputil`, CfgMgr and the IPHLPAPI owner check
   are architecture-neutral (the TCP owner row is 24 bytes on every 64-bit
@@ -212,33 +90,48 @@ payload its machines can load.
 ### Compatibility
 
 - No public API or profile format change; controller personas are unchanged.
-- Works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or 0.9.8.1**, on x64
-  and on ARM64.
-- The x64 DLL is functionally identical to 4.8.0 apart from the diagnostics
-  above and the per-architecture temp folder.
+- Windows: works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or
+  0.9.8.1**, on x64 and on ARM64.
+- Linux: any mainline kernel with `vhci_hcd`; attach requires root, and the
+  distribution's `usbip` tool can attach by hand with
+  `--tcp-port <server port>`.
 - The bytes on the wire and in the shared input section are unchanged.
+- `GKOemNameOverride` is a no-op on Linux: joystick OEM labels come from a
+  Windows registry database with no Linux equivalent.
 
 ### Artifacts
 
 | File | Size | Notes |
 | --- | --- | --- |
-| `GKMD-v4.9.0-x64.zip` | 25,428,724 bytes | x64 build: `GKMD.dll` (26,416,640 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-arm64.zip` | 18,356,721 bytes | ARM64 build: `GKMD.dll` (19,393,024 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-x64.zip` | 25,426,895 bytes | Windows x64: `GKMD.dll` (26,413,056 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-arm64.zip` | 18,355,088 bytes | Windows ARM64: `GKMD.dll` (19,389,952 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux.zip` | 131,647 bytes | Linux (`net10.0`): `GKMD.dll` (313,856 bytes, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
 
 SHA-256:
 
-- `GKMD-v4.9.0-x64.zip`: `1F85FAF0991794A3E61E744CD04204AB4E3ED2DD3FC6FEA4271B4829C1319ECB`
-- `GKMD-v4.9.0-arm64.zip`: `9C8CC48FAA22CA10A6725617603BA1C3188D3B0DF882480D2268AC36A53AC2E0`
+- `GKMD-v4.9.0-x64.zip`: `5CE1083FA111491248B554E4DF3D15B5EE157F3B5E87863E21F174BD31FED723`
+- `GKMD-v4.9.0-arm64.zip`: `23F11F4F0BA54B126AC8B36EFAD7AFB4124DA10E542498173126EFCAAE64EF49`
+- `GKMD-v4.9.0-linux.zip`: `C68E60DF012546087422F7E3B5A1C175698413A6128BB38B89167B09C3E02D50`
 
-Produced by `dotnet build -c Release -t:PackageRelease -r win-x64` and the same
-with `-r win-arm64`; Native AOT compilation happens in the host application
-(GKME), not in this library.
+Produced by the three `PackageRelease` commands above; Native AOT compilation
+happens in the host application (GKME), not in this library.
+
+### Build / verify
+
+```powershell
+dotnet build -c Release                        # both TFMs, 0 warnings
+dotnet build -c Release -f net10.0             # Linux only
+dotnet build -c Release -f net10.0-windows     # Windows x64
+dotnet build -c Release -f net10.0-windows -r win-arm64
+```
 
 ### Known limitations
 
-- Windows only (`net10.0-windows`).
-- One payload per build: shipping the x64 DLL on Windows on Arm, or the ARM64
-  DLL on x64, is reported at install time rather than silently worked around.
+- Linux attach requires root; there is no unprivileged helper.
+- `UsbipReceiveMode` is Windows-only and ignored by the Linux build.
+- One payload per Windows build: shipping the x64 DLL on Windows on Arm, or the
+  ARM64 DLL on x64, is reported at install time rather than silently worked
+  around.
 - Layout (de)serialization uses reflection-based `System.Text.Json`; under a
   trimmed/AOT host the `GKLayout*` types must be preserved by the host.
 - Owner records and transport-index leases, direct usbip-win2 host-controller
@@ -248,15 +141,54 @@ with `-r win-arm64`; Native AOT compilation happens in the host application
 
 ---
 
-## v4.9.0 — 2026-11-01 — Windows on Arm 支持（按架构构建）
+## v4.9.0 — 2026-11-01 — Linux 支持与 Windows on Arm
 
-[English](#v490--2026-11-01--windows-on-arm-per-architecture-builds) | **简体中文**
+[English](#v490--2026-11-01--linux-support-and-windows-on-arm) | **简体中文**
 
-GKMD 4.9.0 以「同一程序集的第二个构建」的方式支持 Windows on Arm。每个构建
-只内嵌一份 usbip-win2 0.9.8.1 官方安装器——x64 构建带 x64 版，ARM64 构建带
-ARM64 版——宿主只需随包分发目标机器能用的那份载荷。
+GKMD 4.9.0 在同一个 AnyCPU 程序集上加入 Linux 支持与 Windows on Arm 支持。
+共有三个构建：Windows x64 与 Windows ARM64 各自内嵌一份 usbip-win2 0.9.8.1
+官方安装器；Linux 使用主线内核自带的 `vhci_hcd`，不需要 GKMD 自己的驱动。
 
 ### 亮点
+
+#### Linux（内核 `vhci_hcd`）
+
+- **多目标构建** —— `GKMD.csproj` 现在同时构建 `net10.0-windows`（usbip-win2、
+  `GKMD_WINDOWS` 宏、内嵌安装器）与 `net10.0`（Linux）。宿主通过
+  `ProjectReference` 自动选择对应构建，GKME 或其它调用方无需改源码或 API。
+- **通过 sysfs 的托管 attach** —— `VhciClient.Linux.cs` 连接进程内 server，
+  自己在托管代码中完成 `OP_REQ_IMPORT` 握手，再把已连接的 socket 以
+  `port sockfd devid speed` 写入
+  `/sys/devices/platform/vhci_hcd.0/attach` 交给内核。detach、status 以及
+  `/var/run/vhci_hcd/port<N>` location 记录都与 `usbip` 工具一致，因此按
+  location 拆除与死设备清扫无需改动。交棒前用 `fcntl` 清除 `O_NONBLOCK`，
+  因为内核客户端要求阻塞 socket。
+- **用 `modprobe` 取代安装器** —— `UsbipDriverInstaller.Linux.cs` 保持相同
+  API（`EnsureInstalled`、`Install`、`IsInstalled`、`BundledArchitecture`）。
+  `EnsureInstalled` 只探测，`vhci_hcd` 缺失时抛
+  `UsbipInstallRequiredException`；`Install` 在已是 root 时直接执行
+  `modprobe vhci-hcd`，非 root 的交互式安装则经 `pkexec` 提权。
+- **按 uid 准入** —— Linux 的导入由用户态发起，不存在 System 进程的 socket。
+  `TcpConnectionOwner.Linux.cs` 从 `/proc/net/tcp` 读取对端 uid，server 放行
+  root 或本进程自身。
+- **异步 detach** —— 断开由内核 hub 线程执行，因此 detach 会（有界地）等待
+  端口回到 `VDEV_ST_NULL`（4），而不是期待同步 ioctl。Linux 没有 re-attach
+  attempts 需要取消，`StopAttachAttempts` 为空操作。
+- **端口 0 是真实端口** —— Linux 的 vhci 全局端口号从 0 开始（Windows 从 1
+  开始），因此 `VhciClient.Detach` 只在参数为负时表示「全部端口」，
+  `FindLocation` 在未找到时返回 -1。
+- **可移植的进程内通道** —— `SharedMemoryIO` 不再使用命名 section 或命名
+  Win32 event：两端现在总在同一进程内，因此改为 `NativeMemory.AllocZeroed`
+  加托管 `AutoResetEvent`。帧路径上的最后一处 Win32 依赖被移除，Windows 与
+  Linux 行为一致。
+- **已在 WSL2 上验证** —— 在内核
+  `6.6.87.2-microsoft-standard-WSL2` 的 Ubuntu 上，DualShock 4 与 Switch Pro
+  人格经 `vhci_hcd` 完成枚举，`usbhid` 绑定其 HID 接口（DualShock 4 的音频
+  接口由 `snd-usb-audio` 绑定），提交的状态产生了 evdev 轴 / 按键事件，
+  detach 后所有端口回到 `VDEV_ST_NULL`，两个进程并发 attach 分别落在端口 0
+  和 1 且互不干扰。测试可用 `tools/LinuxSmokeTest` 复现。
+
+#### Windows on Arm
 
 - **ARM64 载荷** —— `Resources/USBip-0.9.8.1-arm64.exe` 是上游 release 原始
   资源，未做任何修改（19,060,408 字节，SHA-256
@@ -278,39 +210,54 @@ ARM64 版——宿主只需随包分发目标机器能用的那份载荷。
 - **逐载荷校验** —— 每个架构各自携带 release API 公布的 SHA-256，解包后校验；
   不匹配时仍会删除文件并抛异常，而不会执行。解包目录按架构区分
   （`%TEMP%\GKMD_usbip_0.9.8.1_arm64`）。
-- **其余行为不变** —— `VhciClient` 的 vhci IOCTL 布局中没有指针宽度字段，
-  0.9.8.1 ARM64 驱动同样支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，
-  原有探测逻辑照常识别已安装驱动的布局。`pnputil`、CfgMgr 与 IPHLPAPI 的
-  owner 检查均与架构无关（TCP owner 行在所有 64 位目标上都是 24 字节）。
+- **vHCI 布局不变** —— IOCTL 结构中没有指针宽度字段，0.9.8.1 ARM64 驱动同样
+  支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，原有探测逻辑照常识别
+  已安装驱动的布局。`pnputil`、CfgMgr 与 IPHLPAPI 的 owner 检查均与架构无关
+  （TCP owner 行在所有 64 位目标上都是 24 字节）。
 
 ### 兼容性
 
 - 无公开 API 或 profile 格式变化；各手柄人格不变。
-- 兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**，x64 与 ARM64 均可。
-- x64 DLL 除上述诊断与按架构区分的临时目录外，功能与 4.8.0 完全一致。
+- Windows：兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**，x64 与
+  ARM64 均可。
+- Linux：任意带 `vhci_hcd` 的主线内核；attach 需要 root，发行版自带的
+  `usbip` 工具可用 `--tcp-port <server 端口>` 手动连接。
 - 线上字节与共享输入 section 的字节不变。
+- `GKOemNameOverride` 在 Linux 上为空操作：手柄 OEM 名称来自 Windows 注册表
+  数据库，Linux 没有对应物。
 
 ### 产物
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `GKMD-v4.9.0-x64.zip` | 25,428,724 字节 | x64 构建：`GKMD.dll`（26,416,640 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-arm64.zip` | 18,356,721 字节 | ARM64 构建：`GKMD.dll`（19,393,024 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-x64.zip` | 25,426,895 字节 | Windows x64：`GKMD.dll`（26,413,056 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-arm64.zip` | 18,355,088 字节 | Windows ARM64：`GKMD.dll`（19,389,952 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux.zip` | 131,647 字节 | Linux（`net10.0`）：`GKMD.dll`（313,856 字节，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
 
 SHA-256：
 
-- `GKMD-v4.9.0-x64.zip`：`1F85FAF0991794A3E61E744CD04204AB4E3ED2DD3FC6FEA4271B4829C1319ECB`
-- `GKMD-v4.9.0-arm64.zip`：`9C8CC48FAA22CA10A6725617603BA1C3188D3B0DF882480D2268AC36A53AC2E0`
+- `GKMD-v4.9.0-x64.zip`：`5CE1083FA111491248B554E4DF3D15B5EE157F3B5E87863E21F174BD31FED723`
+- `GKMD-v4.9.0-arm64.zip`：`23F11F4F0BA54B126AC8B36EFAD7AFB4124DA10E542498173126EFCAAE64EF49`
+- `GKMD-v4.9.0-linux.zip`：`C68E60DF012546087422F7E3B5A1C175698413A6128BB38B89167B09C3E02D50`
 
-分别由 `dotnet build -c Release -t:PackageRelease -r win-x64` 与
-`dotnet build -c Release -t:PackageRelease -r win-arm64` 生成；Native AOT
-编译在宿主应用（GKME）中完成，而非本类库。
+分别由上文三条 `PackageRelease` 命令生成；Native AOT 编译在宿主应用（GKME）
+中完成，而非本类库。
+
+### 构建 / 验证
+
+```powershell
+dotnet build -c Release                        # 两个目标，0 警告
+dotnet build -c Release -f net10.0             # 仅 Linux
+dotnet build -c Release -f net10.0-windows     # Windows x64
+dotnet build -c Release -f net10.0-windows -r win-arm64
+```
 
 ### 已知限制
 
-- 仅支持 Windows（`net10.0-windows`）。
-- 每个构建只有一份载荷：把 x64 DLL 发到 Windows on Arm（或把 ARM64 DLL 发到
-  x64）会在安装时被明确报错，而不是被静默绕过。
+- Linux 的 attach 需要 root，没有非特权 helper。
+- `UsbipReceiveMode` 仅适用于 Windows，Linux 构建忽略它。
+- 每个 Windows 构建只有一份载荷：把 x64 DLL 发到 Windows on Arm（或把 ARM64
+  DLL 发到 x64）会在安装时被明确报错，而不是被静默绕过。
 - layout 序列化 / 反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT
   宿主中，`GKLayout*` 类型须由宿主保留。
 - 2.0.x 的 owner record 与 transport index lease、直接安装 usbip-win2 host

@@ -336,15 +336,17 @@ GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishT
 
 ## 发布（Releases）
 
-自 v4.9.0 起，每个 [GitHub Release](../../releases) 按架构各附带一个 zip ——
-`GKMD-v<版本>-x64.zip` 与 `GKMD-v<版本>-arm64.zip` —— 各自内含该架构的
-`GKMD.dll`（Release、IL、AnyCPU，仅内嵌一份 usbip-win2 安装器）、`LICENSE`
-与 `THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。同一程序集的
-Linux 构建不打包：它不携带安装器载荷。用以下命令同时生成两个包：
+自 v4.9.0 起，每个 [GitHub Release](../../releases) 按产物各附带一个 zip ——
+`GKMD-v<版本>-x64.zip`、`GKMD-v<版本>-arm64.zip` 与
+`GKMD-v<版本>-linux.zip` —— 各自内含该构建的 `GKMD.dll`（Release、IL、
+AnyCPU）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制
+副本分发。两个 Windows 构建只内嵌各自架构的 usbip-win2 安装器；Linux 构建
+不携带安装器载荷（改用主线内核的 `vhci_hcd`）。用以下命令生成三个包：
 
 ```powershell
 dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
 dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease
 ```
 
 v4.8.0 及更早的版本只附带一个 RID 无关的 `GKMD-v<版本>.zip`。变更日志见
