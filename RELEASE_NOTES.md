@@ -1,280 +1,262 @@
 # Release notes
 
-## v4.9.0 — 2026-11-01 — Linux support and Windows on Arm
+## v4.9.0 — 2026-11-01 — NativeAOT distribution, Linux support and Windows on Arm
 
-**English** | [简体中文](#v490--2026-11-01--linux-支持与-windows-on-arm)
+**English** | [简体中文](#v490--2026-11-01--nativeaot-分发linux-支持与-windows-on-arm)
 
-GKMD 4.9.0 adds Linux support and Windows on Arm support to the same AnyCPU
-assembly. Release packages cover Windows x64, Windows ARM64, Linux x64 and
-Linux ARM64. The two Windows builds each embed exactly one official usbip-win2
-0.9.8.1 installer; the Linux builds ride mainline's in-kernel `vhci_hcd` and
-carry no installer payload.
+GKMD 4.9.0 changes the distribution form to **NativeAOT** and adds Linux
+support and Windows on Arm. Every released artifact is now a native shared
+library exporting the `gkmd_*` C ABI:
+
+| Platform | Artifact |
+| --- | --- |
+| Windows x64 / ARM64 | `GKMD.dll` (native PE) |
+| Linux x64 / ARM64 | `libGKMD.so` (native ELF) |
+
+The managed assembly is no longer a distributable form. GKME compiles the
+GKMD sources into its own AOT image; other callers use the C ABI in
+`gkmd.h`.
 
 ### Highlights
 
+#### NativeAOT and the C ABI
+
+- **PublishAot by default** — `GKMD.csproj` sets `<PublishAot>true</PublishAot>`.
+  Because the project is `OutputType=Library`, the SDK emits a shared library
+  (`NativeLib=Shared`) and exports every `[UnmanagedCallersOnly]` entry point.
+- **19 `gkmd_*` functions** — version/error, context lifecycle, profile
+  enumeration by index, controller creation/destruction, `SubmitGamepad`,
+  `SubmitRawReport`, and an output callback. The full contract is in
+  `Native/gkmd.h`, shipped in every zip.
+- **Blittable boundary** — `GkmdGamepadState` / `GkmdAxisValue` mirror
+  `GKGamepadState`; strings are UTF-8; managed objects are opaque `void*`
+  handles. No CLR marshalling and no managed assembly are involved.
+- **Resources survive AOT** — the embedded usbip-win2 installer is still a
+  manifest resource after publishing; the x64 build carries the x64 asset and
+  the ARM64 build the ARM64 asset.
+- **GKME source integration** — `GKME.csproj` now uses
+  `<Compile Include="..\GKMD\**\*.cs" ...>` plus the embedded payload instead
+  of `ProjectReference`. The resulting AOT image behaves the same.
+
 #### Linux (in-kernel `vhci_hcd`)
 
-- **Multi-targeting** — `GKMD.csproj` now builds `net10.0-windows` (usbip-win2,
-  `GKMD_WINDOWS` define, embedded installer) and `net10.0` (Linux). A host picks
-  the right build through `ProjectReference`, so no source or API change is
-  needed in GKME or any other consumer.
 - **Managed attach through sysfs** — `VhciClient.Linux.cs` connects to the
   in-process server, performs the `OP_REQ_IMPORT` handshake itself, and hands
   the connected socket to the kernel by writing `port sockfd devid speed` to
   `/sys/devices/platform/vhci_hcd.0/attach`. Detach, status and the
   `/var/run/vhci_hcd/port<N>` location records match the `usbip` tool, so
-  location-based detach and the stale sweep work unchanged. `O_NONBLOCK` is
-  cleared with `fcntl` before the handoff because the kernel client expects a
-  blocking socket.
-- **`modprobe` replaces the installer** — `UsbipDriverInstaller.Linux.cs` keeps
-  the same API (`EnsureInstalled`, `Install`, `IsInstalled`,
-  `BundledArchitecture`). `EnsureInstalled` only probes and throws
+  location-based detach and the stale sweep work unchanged.
+- **`modprobe` replaces the installer** — `UsbipDriverInstaller.Linux.cs`
+  keeps the same API. `EnsureInstalled` only probes and throws
   `UsbipInstallRequiredException` when `vhci_hcd` is absent; `Install` runs
   `modprobe vhci-hcd` directly when root and through `pkexec` for an
   interactive, non-root install.
-- **uid-based admission** — Linux imports are user-space initiated, so there is
-  no System-process socket to check. `TcpConnectionOwner.Linux.cs` reads the
-  peer's uid from `/proc/net/tcp` and the server admits root or this process's
-  own uid.
-- **Asynchronous detach** — the kernel's hub thread runs the disconnect, so
-  detach waits (bounded) for the port to report `VDEV_ST_NULL` (4) instead of
-  expecting a synchronous ioctl. There are no re-attach attempts to cancel, so
-  `StopAttachAttempts` is a no-op.
+- **uid-based admission** — `TcpConnectionOwner.Linux.cs` reads the peer's uid
+  from `/proc/net/tcp` and the server admits root or this process's own uid.
+- **Asynchronous detach** — detach waits (bounded) for the port to report
+  `VDEV_ST_NULL` (4) instead of expecting a synchronous ioctl.
 - **Port 0 is a real port** — Linux's global vhci numbering starts at 0
-  (Windows starts at 1), so `VhciClient.Detach` treats only a negative value as
-  "every port", and `FindLocation` returns -1 when nothing matches.
-- **Portable in-process channel** — `SharedMemoryIO` no longer uses named
-  sections or named Win32 events: both ends are always in one process now, so
-  it is a block of `NativeMemory.AllocZeroed` plus managed `AutoResetEvent`s.
-  This removes the last Win32 dependency from the frame path and works
-  identically on Windows and Linux.
-- **Verified on WSL2** — on Ubuntu with kernel
-  `6.6.87.2-microsoft-standard-WSL2`, the DualShock 4 and Switch Pro personas
-  enumerated through `vhci_hcd`, `usbhid` bound their HID interface (and
-  `snd-usb-audio` the DualShock 4 audio interfaces), submitted state produced
-  evdev axis and button events, detach returned every port to `VDEV_ST_NULL`,
-  and two concurrent processes attached on ports 0 and 1 without interfering.
-  `tools/LinuxSmokeTest` reproduces this test.
+  (Windows starts at 1), so `VhciClient.Detach` treats only a negative value
+  as "every port", and `FindLocation` returns -1 when nothing matches.
+- **Verified on WSL2** — the managed backend was verified against
+  `6.6.87.2-microsoft-standard-WSL2` (DualShock 4 and Switch Pro enumerated,
+  `usbhid` bound HID, evdev produced events, detach returned every port to
+  `VDEV_ST_NULL`, concurrent attaches used ports 0 and 1). The NativeAOT
+  `libGKMD.so` was loaded through `ctypes` and enumerated all 10 profiles.
 
 #### Windows on Arm
 
 - **ARM64 payload** — `Resources/USBip-0.9.8.1-arm64.exe` is the upstream
   release asset, unmodified (19,060,408 bytes, SHA-256
-  `CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800`, matching
-  the digest the GitHub release API publishes). Like the x64 asset it is a
-  32-bit Inno Setup binary; what differs is the driver package it carries
-  (ARM64 `usbip2_ude.sys`).
-- **One payload per build** — `GKMD.csproj` selects the installer from
-  `UsbipPayloadArch`, which follows `RuntimeIdentifier` when one is given
-  (`dotnet build -r win-arm64`) and defaults to x64. The two builds therefore
-  land in `bin\Release\net10.0-windows\` (x64) and `...\win-arm64\` (ARM64),
-  and a host that sets its RID in its own project file forwards
-  `-p:UsbipPayloadArch=arm64`. Any other value fails the build.
-- **OS-architecture selection** — at run time `UsbipDriverInstaller` still
-  chooses by `RuntimeInformation.OSArchitecture`, not the process
-  architecture: an x64 host process under emulation on Windows on Arm has to
-  install the ARM64 driver, the only kind ARM64 Windows loads. When the
-  shipped build carries the other payload, extraction throws a message naming
-  the build to ship instead of running an installer that cannot work.
-  `UsbipDriverInstaller.BundledArchitecture` reports what a build carries.
-- **Per-payload verification** — each architecture carries its own SHA-256 from
-  the release API and is checked after extraction; a mismatch still deletes the
-  file and throws instead of running it. Extraction uses a per-architecture
-  temp directory (`%TEMP%\GKMD_usbip_0.9.8.1_arm64`).
+  `CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800`). Like the
+  x64 asset it is a 32-bit Inno Setup binary; what differs is the driver
+  package it carries (ARM64 `usbip2_ude.sys`).
+- **One payload per build** — `UsbipPayloadArch` follows `RuntimeIdentifier`
+  when one is given and defaults to x64. Any other value fails the build.
+- **OS-architecture selection** — at run time `UsbipDriverInstaller` chooses
+  by `RuntimeInformation.OSArchitecture`, not the process architecture: an
+  x64 host process under emulation on Windows on Arm still installs the ARM64
+  driver, the only kind ARM64 Windows loads.
 - **vHCI layouts unchanged** — the IOCTL structs contain no pointer-sized
   fields, so the 0.9.8.1 ARM64 driver speaks the same
-  `0.9.8.1 / 0.9.8.0 / 0.9.7.x` request layouts and the existing probe still
-  discovers the installed one. `pnputil`, CfgMgr and the IPHLPAPI owner check
-  are architecture-neutral (the TCP owner row is 24 bytes on every 64-bit
-  target).
+  `0.9.8.1 / 0.9.8.0 / 0.9.7.x` request layouts and the existing probe
+  discovers the installed one.
 
-### Compatibility
+### Breaking changes
 
-- No public API or profile format change; controller personas are unchanged.
-- Windows: works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or
-  0.9.8.1**, on x64 and on ARM64.
-- Linux: any mainline kernel with `vhci_hcd`; attach requires root, and the
-  distribution's `usbip` tool can attach by hand with
-  `--tcp-port <server port>`.
-- The bytes on the wire and in the shared input section are unchanged.
-- `GKOemNameOverride` is a no-op on Linux: joystick OEM labels come from a
-  Windows registry database with no Linux equivalent.
+- The release zip no longer contains a managed `GKMD.dll`; it contains a
+  native library. Existing `ProjectReference` consumers must either include
+  the sources (as GKME does) or call the `gkmd_*` C ABI.
+- The managed API itself is unchanged for source consumers.
+- The version stays **4.9.0**; this is a distribution-form change, not a new
+  feature line.
 
 ### Artifacts
 
 | File | Size | Notes |
 | --- | --- | --- |
-| `GKMD-v4.9.0-windows-x64.zip` | 25,426,898 bytes | Windows x64: `GKMD.dll` (26,413,056 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-windows-arm64.zip` | 18,355,046 bytes | Windows ARM64: `GKMD.dll` (19,389,952 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux-x64.zip` | 131,657 bytes | Linux x64 (`net10.0`, `linux-x64`): `GKMD.dll` (313,856 bytes, AnyCPU IL, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux-arm64.zip` | 131,666 bytes | Linux ARM64 (`net10.0`, `linux-arm64`): `GKMD.dll` (313,856 bytes, AnyCPU IL, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-x64.zip` | 26,701,763 bytes | Windows x64: `GKMD.dll` (29,062,144 bytes, NativeAOT PE, embeds `USBip-0.9.8.1-x64.exe`), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-arm64.zip` | 19,559,613 bytes | Windows ARM64: `GKMD.dll` (22,118,912 bytes, NativeAOT PE, embeds `USBip-0.9.8.1-arm64.exe`), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-x64.zip` | 1,639,308 bytes | Linux x64: `libGKMD.so` (3,303,216 bytes, NativeAOT ELF, no installer payload), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-arm64.zip` | 1,569,281 bytes | Linux ARM64: `libGKMD.so` (3,438,320 bytes, NativeAOT ELF, no installer payload), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
 
 SHA-256:
 
-- `GKMD-v4.9.0-windows-x64.zip`: `DAA07017C13CADC68B346057449626B3DA0790D40C684FA4D9CE9675F541640C`
-- `GKMD-v4.9.0-windows-arm64.zip`: `13B7CA46BCE1E9B214A99EBCDC6F9CF49457F93D7A10B95AD222661E52DA348F`
-- `GKMD-v4.9.0-linux-x64.zip`: `B91FDEB740EF223E6393F03D434DBD4CFFDA07787CF1E77B4A6F5AA0BFABCD06`
-- `GKMD-v4.9.0-linux-arm64.zip`: `BAE4C34D45C7A089E4A430E36867B89013F9F15DCAB6A514CB3A5625E869E55A`
-
-Produced by the four `PackageRelease` commands above; Native AOT compilation
-happens in the host application (GKME), not in this library.
+- `GKMD-v4.9.0-windows-x64.zip`: `C6D3FF0BE08FC919E2ED021AD699A84C397B456A7696675739B7B439D6195CD7`
+- `GKMD-v4.9.0-windows-arm64.zip`: `127FD73105505D520B00D1A1B32E50CD181F260E07BE93798F85759A21134925`
+- `GKMD-v4.9.0-linux-x64.zip`: `473814E1EE225E43BA3762E881AE6EDB6CBFF2FF173416F499C584E7642ADB8A`
+- `GKMD-v4.9.0-linux-arm64.zip`: `D3DEC59057E88ADD5558A96F2BAA914263B94F4D15E27A4C730C1150D6AD13E5`
 
 ### Build / verify
 
 ```powershell
-dotnet build -c Release                          # both TFMs, 0 warnings
-dotnet build -c Release -f net10.0 -r linux-x64
-dotnet build -c Release -f net10.0 -r linux-arm64
-dotnet build -c Release -f net10.0-windows -r win-x64
-dotnet build -c Release -f net10.0-windows -r win-arm64
+dotnet build -c Release                          # IL + analyzers, 0 warnings
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 ```
+
+Cross-compilation constraints: NativeAOT cannot cross operating systems, so
+the Linux RIDs are built on Linux (for example WSL). Windows ARM64 needs the
+**MSVC ARM64/ARM64EC build tools** component
+(`Microsoft.VisualStudio.Component.VC.Tools.ARM64`). Linux ARM64 on an x64
+host needs `aarch64-linux-gnu-objcopy` and
+`-p:ObjCopyName=aarch64-linux-gnu-objcopy`.
 
 ### Known limitations
 
 - Linux attach requires root; there is no unprivileged helper.
 - `UsbipReceiveMode` is Windows-only and ignored by the Linux build.
-- The Linux zips contain the AnyCPU `GKMD.dll`, not a self-contained runtime;
-  the host publishes its application with its own RID.
-- One payload per Windows build: shipping the x64 DLL on Windows on Arm, or the
-  ARM64 DLL on x64, is reported at install time rather than silently worked
-  around.
+- One payload per Windows build: shipping the x64 DLL on Windows on Arm, or
+  the ARM64 DLL on x64, is reported at install time rather than silently
+  worked around.
 - Layout (de)serialization uses reflection-based `System.Text.Json`; under a
   trimmed/AOT host the `GKLayout*` types must be preserved by the host.
-- Owner records and transport-index leases, direct usbip-win2 host-controller
-  installation and `HMUninstall` from 2.0.x remain unsynced (not applicable to
-  GKMD's transport); the ARM64 driver files come from the upstream installer,
-  not from embedded `usbip2_ude` files.
+- The native ABI is new. Consumers that need the managed types must compile
+  the sources, not reference the released binary.
 
 ---
 
-## v4.9.0 — 2026-11-01 — Linux 支持与 Windows on Arm
+## v4.9.0 — 2026-11-01 — NativeAOT 分发、Linux 支持与 Windows on Arm
 
-[English](#v490--2026-11-01--linux-support-and-windows-on-arm) | **简体中文**
+[English](#v490--2026-11-01--nativeaot-distribution-linux-support-and-windows-on-arm) | **简体中文**
 
-GKMD 4.9.0 在同一个 AnyCPU 程序集上加入 Linux 支持与 Windows on Arm 支持。
-发布包覆盖 Windows x64、Windows ARM64、Linux x64 与 Linux ARM64。两个 Windows
-构建各自内嵌一份 usbip-win2 0.9.8.1 官方安装器；Linux 构建使用主线内核自带的
-`vhci_hcd`，不携带安装器载荷。
+GKMD 4.9.0 把分发形态改为 **NativeAOT**，并加入 Linux 支持与 Windows on Arm。
+每个发布产物都是导出 `gkmd_*` C ABI 的 native 共享库：
+
+| 平台 | 产物 |
+| --- | --- |
+| Windows x64 / ARM64 | `GKMD.dll`（native PE） |
+| Linux x64 / ARM64 | `libGKMD.so`（native ELF） |
+
+managed assembly 不再是分发形态。GKME 把 GKMD 源码编译进自己的 AOT 镜像；
+其他调用方使用 `gkmd.h` 中的 C ABI。
 
 ### 亮点
 
+#### NativeAOT 与 C ABI
+
+- **默认 PublishAot** —— `GKMD.csproj` 设置 `<PublishAot>true</PublishAot>`。
+  工程是 `OutputType=Library`，SDK 因此生成共享库（`NativeLib=Shared`），并导出
+  所有 `[UnmanagedCallersOnly]` 入口。
+- **19 个 `gkmd_*` 函数** —— 版本 / 错误、context 生命周期、按索引枚举 profile、
+  controller 创建 / 销毁、`SubmitGamepad`、`SubmitRawReport` 与输出回调。完整契约
+  见 `Native/gkmd.h`，随每个 zip 分发。
+- **blittable 边界** —— `GkmdGamepadState` / `GkmdAxisValue` 对应
+  `GKGamepadState`；字符串为 UTF-8；托管对象以不透明 `void*` 句柄传递。不涉及
+  CLR marshalling，也不依赖 managed assembly。
+- **资源在 AOT 后保留** —— 内嵌的 usbip-win2 安装器在发布后仍是 manifest
+  resource；x64 构建携带 x64 载荷，ARM64 构建携带 ARM64 载荷。
+- **GKME 源码集成** —— `GKME.csproj` 改用
+  `<Compile Include="..\GKMD\**\*.cs" ...>` 加内嵌载荷，不再使用
+  `ProjectReference`；生成的 AOT 镜像行为不变。
+
 #### Linux（内核 `vhci_hcd`）
 
-- **多目标构建** —— `GKMD.csproj` 现在同时构建 `net10.0-windows`（usbip-win2、
-  `GKMD_WINDOWS` 宏、内嵌安装器）与 `net10.0`（Linux）。宿主通过
-  `ProjectReference` 自动选择对应构建，GKME 或其它调用方无需改源码或 API。
 - **通过 sysfs 的托管 attach** —— `VhciClient.Linux.cs` 连接进程内 server，
-  自己在托管代码中完成 `OP_REQ_IMPORT` 握手，再把已连接的 socket 以
+  自己完成 `OP_REQ_IMPORT` 握手，再把已连接的 socket 以
   `port sockfd devid speed` 写入
-  `/sys/devices/platform/vhci_hcd.0/attach` 交给内核。detach、status 以及
-  `/var/run/vhci_hcd/port<N>` location 记录都与 `usbip` 工具一致，因此按
-  location 拆除与死设备清扫无需改动。交棒前用 `fcntl` 清除 `O_NONBLOCK`，
-  因为内核客户端要求阻塞 socket。
+  `/sys/devices/platform/vhci_hcd.0/attach` 交给内核。detach、status 与
+  `/var/run/vhci_hcd/port<N>` location 记录都与 `usbip` 工具一致。
 - **用 `modprobe` 取代安装器** —— `UsbipDriverInstaller.Linux.cs` 保持相同
-  API（`EnsureInstalled`、`Install`、`IsInstalled`、`BundledArchitecture`）。
-  `EnsureInstalled` 只探测，`vhci_hcd` 缺失时抛
-  `UsbipInstallRequiredException`；`Install` 在已是 root 时直接执行
-  `modprobe vhci-hcd`，非 root 的交互式安装则经 `pkexec` 提权。
-- **按 uid 准入** —— Linux 的导入由用户态发起，不存在 System 进程的 socket。
-  `TcpConnectionOwner.Linux.cs` 从 `/proc/net/tcp` 读取对端 uid，server 放行
-  root 或本进程自身。
-- **异步 detach** —— 断开由内核 hub 线程执行，因此 detach 会（有界地）等待
-  端口回到 `VDEV_ST_NULL`（4），而不是期待同步 ioctl。Linux 没有 re-attach
-  attempts 需要取消，`StopAttachAttempts` 为空操作。
+  API；`EnsureInstalled` 只探测，`vhci_hcd` 缺失时抛
+  `UsbipInstallRequiredException`；`Install` 在 root 下直接执行
+  `modprobe vhci-hcd`，非 root 的交互式安装经 `pkexec` 提权。
+- **按 uid 准入** —— `TcpConnectionOwner.Linux.cs` 从 `/proc/net/tcp` 读取
+  对端 uid，server 放行 root 或本进程自身。
+- **异步 detach** —— detach 会（有界地）等待端口回到 `VDEV_ST_NULL`（4）。
 - **端口 0 是真实端口** —— Linux 的 vhci 全局端口号从 0 开始（Windows 从 1
   开始），因此 `VhciClient.Detach` 只在参数为负时表示「全部端口」，
   `FindLocation` 在未找到时返回 -1。
-- **可移植的进程内通道** —— `SharedMemoryIO` 不再使用命名 section 或命名
-  Win32 event：两端现在总在同一进程内，因此改为 `NativeMemory.AllocZeroed`
-  加托管 `AutoResetEvent`。帧路径上的最后一处 Win32 依赖被移除，Windows 与
-  Linux 行为一致。
-- **已在 WSL2 上验证** —— 在内核
-  `6.6.87.2-microsoft-standard-WSL2` 的 Ubuntu 上，DualShock 4 与 Switch Pro
-  人格经 `vhci_hcd` 完成枚举，`usbhid` 绑定其 HID 接口（DualShock 4 的音频
-  接口由 `snd-usb-audio` 绑定），提交的状态产生了 evdev 轴 / 按键事件，
-  detach 后所有端口回到 `VDEV_ST_NULL`，两个进程并发 attach 分别落在端口 0
-  和 1 且互不干扰。测试可用 `tools/LinuxSmokeTest` 复现。
+- **已在 WSL2 上验证** —— 托管后端在
+  `6.6.87.2-microsoft-standard-WSL2` 上完成验证（DualShock 4 与 Switch Pro
+  枚举、`usbhid` 绑定 HID、evdev 产生事件、detach 后所有端口回到
+  `VDEV_ST_NULL`、两个进程并发 attach 分别落在端口 0 和 1）。NativeAOT 的
+  `libGKMD.so` 也通过 `ctypes` 加载并枚举出全部 10 个 profile。
 
 #### Windows on Arm
 
 - **ARM64 载荷** —— `Resources/USBip-0.9.8.1-arm64.exe` 是上游 release 原始
-  资源，未做任何修改（19,060,408 字节，SHA-256
-  `CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800`，与
-  GitHub release API 公布的摘要一致）。与 x64 载荷一样，它本身是一个 32 位
-  Inno Setup 程序，区别在于内部携带的驱动包是 ARM64 的 `usbip2_ude.sys`。
-- **每个构建一份载荷** —— `GKMD.csproj` 用 `UsbipPayloadArch` 选择安装器：
-  该属性在给出 `RuntimeIdentifier` 时跟随它（`dotnet build -r win-arm64`），
-  否则默认为 x64。因此两个构建分别落在
-  `bin\Release\net10.0-windows\`（x64）与 `...\win-arm64\`（ARM64）；若宿主
-  在自己的工程文件里设置 RID，则需转发 `-p:UsbipPayloadArch=arm64`。取值
-  只允许 `x64` / `arm64`，其他值会让构建直接失败。
-- **按 OS 架构选择** —— 运行时 `UsbipDriverInstaller` 仍依据
-  `RuntimeInformation.OSArchitecture` 而不是进程架构选择载荷：宿主 App 的
-  x64 版本在 Windows on Arm 上以模拟方式运行，但内核只加载 ARM64 驱动，因此
-  必须安装 ARM64 安装器。若随包的构建带的是另一份载荷，解包时会抛出明确
-  异常，指出应该分发哪个构建，而不是运行一个注定失败的安装器。
-  `UsbipDriverInstaller.BundledArchitecture` 可查询当前构建携带的架构。
-- **逐载荷校验** —— 每个架构各自携带 release API 公布的 SHA-256，解包后校验；
-  不匹配时仍会删除文件并抛异常，而不会执行。解包目录按架构区分
-  （`%TEMP%\GKMD_usbip_0.9.8.1_arm64`）。
+  资源，未做修改（19,060,408 字节，SHA-256
+  `CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800`）。
+- **每个构建一份载荷** —— `UsbipPayloadArch` 在给出 `RuntimeIdentifier` 时
+  跟随它，否则默认为 x64；其他值会让构建失败。
+- **按 OS 架构选择** —— 运行时仍依据 `RuntimeInformation.OSArchitecture`
+  而不是进程架构选择载荷：Windows on Arm 上以模拟方式运行的 x64 宿主进程也会
+  安装 ARM64 驱动，因为 ARM64 Windows 只加载 ARM64 内核驱动。
 - **vHCI 布局不变** —— IOCTL 结构中没有指针宽度字段，0.9.8.1 ARM64 驱动同样
-  支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，原有探测逻辑照常识别
-  已安装驱动的布局。`pnputil`、CfgMgr 与 IPHLPAPI 的 owner 检查均与架构无关
-  （TCP owner 行在所有 64 位目标上都是 24 字节）。
+  支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局。
 
-### 兼容性
+### 破坏性变更
 
-- 无公开 API 或 profile 格式变化；各手柄人格不变。
-- Windows：兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**，x64 与
-  ARM64 均可。
-- Linux：任意带 `vhci_hcd` 的主线内核；attach 需要 root，发行版自带的
-  `usbip` 工具可用 `--tcp-port <server 端口>` 手动连接。
-- 线上字节与共享输入 section 的字节不变。
-- `GKOemNameOverride` 在 Linux 上为空操作：手柄 OEM 名称来自 Windows 注册表
-  数据库，Linux 没有对应物。
+- 发布 zip 不再包含 managed `GKMD.dll`，而是 native 库。现有
+  `ProjectReference` 使用者必须改为源码引用（GKME 的做法），或调用
+  `gkmd_*` C ABI。
+- 对源码使用者而言，托管 API 本身不变。
+- 版本保持 **4.9.0**；这是分发形态变更，不是新的功能线。
 
 ### 产物
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `GKMD-v4.9.0-windows-x64.zip` | 25,426,898 字节 | Windows x64：`GKMD.dll`（26,413,056 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-windows-arm64.zip` | 18,355,046 字节 | Windows ARM64：`GKMD.dll`（19,389,952 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux-x64.zip` | 131,657 字节 | Linux x64（`net10.0`、`linux-x64`）：`GKMD.dll`（313,856 字节，AnyCPU IL，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux-arm64.zip` | 131,666 字节 | Linux ARM64（`net10.0`、`linux-arm64`）：`GKMD.dll`（313,856 字节，AnyCPU IL，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-x64.zip` | 26,701,763 字节 | Windows x64：`GKMD.dll`（29,062,144 字节，NativeAOT PE，内嵌 `USBip-0.9.8.1-x64.exe`）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-arm64.zip` | 19,559,613 字节 | Windows ARM64：`GKMD.dll`（22,118,912 字节，NativeAOT PE，内嵌 `USBip-0.9.8.1-arm64.exe`）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-x64.zip` | 1,639,308 字节 | Linux x64：`libGKMD.so`（3,303,216 字节，NativeAOT ELF，无安装器载荷）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-arm64.zip` | 1,569,281 字节 | Linux ARM64：`libGKMD.so`（3,438,320 字节，NativeAOT ELF，无安装器载荷）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
 
 SHA-256：
 
-- `GKMD-v4.9.0-windows-x64.zip`：`DAA07017C13CADC68B346057449626B3DA0790D40C684FA4D9CE9675F541640C`
-- `GKMD-v4.9.0-windows-arm64.zip`：`13B7CA46BCE1E9B214A99EBCDC6F9CF49457F93D7A10B95AD222661E52DA348F`
-- `GKMD-v4.9.0-linux-x64.zip`：`B91FDEB740EF223E6393F03D434DBD4CFFDA07787CF1E77B4A6F5AA0BFABCD06`
-- `GKMD-v4.9.0-linux-arm64.zip`：`BAE4C34D45C7A089E4A430E36867B89013F9F15DCAB6A514CB3A5625E869E55A`
-
-分别由上文四条 `PackageRelease` 命令生成；Native AOT 编译在宿主应用（GKME）
-中完成，而非本类库。
+- `GKMD-v4.9.0-windows-x64.zip`：`C6D3FF0BE08FC919E2ED021AD699A84C397B456A7696675739B7B439D6195CD7`
+- `GKMD-v4.9.0-windows-arm64.zip`：`127FD73105505D520B00D1A1B32E50CD181F260E07BE93798F85759A21134925`
+- `GKMD-v4.9.0-linux-x64.zip`：`473814E1EE225E43BA3762E881AE6EDB6CBFF2FF173416F499C584E7642ADB8A`
+- `GKMD-v4.9.0-linux-arm64.zip`：`D3DEC59057E88ADD5558A96F2BAA914263B94F4D15E27A4C730C1150D6AD13E5`
 
 ### 构建 / 验证
 
 ```powershell
-dotnet build -c Release                          # 两个目标，0 警告
-dotnet build -c Release -f net10.0 -r linux-x64
-dotnet build -c Release -f net10.0 -r linux-arm64
-dotnet build -c Release -f net10.0-windows -r win-x64
-dotnet build -c Release -f net10.0-windows -r win-arm64
+dotnet build -c Release                          # IL + 分析器，0 警告
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 ```
+
+交叉编译限制：NativeAOT 不支持跨操作系统编译，因此 Linux RID 在 Linux 上
+构建（例如 WSL）。Windows ARM64 需要 **MSVC ARM64/ARM64EC 生成工具**组件
+（`Microsoft.VisualStudio.Component.VC.Tools.ARM64`）。在 x64 主机上构建
+Linux ARM64 需要 `aarch64-linux-gnu-objcopy`，并传
+`-p:ObjCopyName=aarch64-linux-gnu-objcopy`。
 
 ### 已知限制
 
 - Linux 的 attach 需要 root，没有非特权 helper。
 - `UsbipReceiveMode` 仅适用于 Windows，Linux 构建忽略它。
-- Linux zip 内是 AnyCPU `GKMD.dll`，不是自包含运行时；宿主需按自己的 RID
-  发布应用。
 - 每个 Windows 构建只有一份载荷：把 x64 DLL 发到 Windows on Arm（或把 ARM64
-  DLL 发到 x64）会在安装时被明确报错，而不是被静默绕过。
+  DLL 发到 x64）会在安装时被明确报错。
 - layout 序列化 / 反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT
   宿主中，`GKLayout*` 类型须由宿主保留。
-- 2.0.x 的 owner record 与 transport index lease、直接安装 usbip-win2 host
-  controller 与 `HMUninstall` 仍未同步（不适用于 GKMD 的传输层）；ARM64 驱动
-  文件来自上游安装器，而不是内嵌的 `usbip2_ude` 文件。
+- native ABI 是新增的；需要托管类型的使用者必须编译源码，而不是引用发布二进制。
 
 ---
 

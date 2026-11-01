@@ -1,12 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Two builds of one assembly. The Windows build rides usbip-win2's
-         vhci host controller and carries the upstream installer for this
-         architecture; the Linux build rides the in-kernel vhci-hcd driver
-         that mainline Linux already provides (module `vhci_hcd`), so it
-         embeds no installer and needs no out-of-tree kernel module. A host
-         picks the matching build automatically through ProjectReference. -->
+    <!-- Two target frameworks, each published as a NativeAOT shared library.
+         The Windows build rides usbip-win2's vhci host controller and carries
+         the upstream installer for this architecture; the Linux build rides
+         the in-kernel vhci-hcd driver that mainline Linux already provides
+         (module `vhci_hcd`), so it embeds no installer and needs no
+         out-of-tree kernel module. The released binary is native and exposes
+         the gkmd_* C ABI in Native/GKMDNative.cs; GKME compiles these sources
+         into its own AOT image instead of using ProjectReference. -->
     <TargetFrameworks>net10.0-windows;net10.0</TargetFrameworks>
     <OutputType>Library</OutputType>
     <AssemblyName>GKMD</AssemblyName>
@@ -23,11 +25,10 @@
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <Description>GKMD virtual USB game controller engine (USB/IP backend), derived from hifihedgehog/HIDMaestro 1.5.1.</Description>
 
-    <!-- AOT compatibility: the engine is published and AOT-compiled by its
-         host (GKME). IsAotCompatible turns on the trim / AOT / single-file
-         analyzers so this library stays linkable from a Native AOT app, and
-         the build is kept warning-free (the only reflection/JSON paths live
-         in GKLayoutLoader.cs with local IL2026/IL3050 suppressions). -->
+    <!-- NativeAOT is the distribution form. IsAotCompatible keeps the trim /
+         AOT / single-file analyzers on for the IL build too, so the sources
+         stay warning-free (the only reflection/JSON paths live in
+         GKLayoutLoader.cs with local IL2026/IL3050 suppressions). -->
     <IsAotCompatible>true</IsAotCompatible>
     <DebugType>full</DebugType>
   </PropertyGroup>
@@ -39,34 +40,33 @@
     <DefineConstants>$(DefineConstants);GKMD_WINDOWS</DefineConstants>
   </PropertyGroup>
 
-  <!-- One DLL per architecture: every Windows build embeds exactly one
-       usbip-win2 installer, so a host ships only the payload its machines
+  <!-- One native binary per architecture: every Windows build embeds exactly
+       one usbip-win2 installer, so a host ships only the payload its machines
        can load. The choice follows the RuntimeIdentifier when one is given
-       (`dotnet build -r win-arm64`, `dotnet publish -r win-arm64` from a
-       host), and can be set directly with -p:UsbipPayloadArch=arm64 by a
-       host that sets its RID in its own project file instead of on the
-       command line. Without either, the build is the x64 one. The Linux
-       build embeds no installer at all: mainline Linux already has the
-       vhci-hcd USB/IP driver. -->
+       (`dotnet publish -r win-arm64`), and can be set directly with
+       -p:UsbipPayloadArch=arm64 by a host that sets its RID in its own project
+       file instead of on the command line. Without either, the build is the
+       x64 one. The Linux build embeds no installer at all: mainline Linux
+       already has the vhci-hcd USB/IP driver. -->
   <PropertyGroup>
     <UsbipPayloadArch Condition="'$(UsbipPayloadArch)' == '' and '$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.ToLowerInvariant().Contains('arm64'))">arm64</UsbipPayloadArch>
     <UsbipPayloadArch Condition="'$(UsbipPayloadArch)' == ''">x64</UsbipPayloadArch>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows' and '$(UsbipPayloadArch)' == 'arm64'">
-    <EmbeddedResource Include="Resources\USBip-0.9.8.1-arm64.exe">
+    <EmbeddedResource Include="Resources/USBip-0.9.8.1-arm64.exe">
       <LogicalName>GKMD.Resources.USBip-0.9.8.1-arm64.exe</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows' and '$(UsbipPayloadArch)' != 'arm64'">
-    <EmbeddedResource Include="Resources\USBip-0.9.8.1-x64.exe">
+    <EmbeddedResource Include="Resources/USBip-0.9.8.1-x64.exe">
       <LogicalName>GKMD.Resources.USBip-0.9.8.1-x64.exe</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Resources\THIRD-PARTY-NOTICES.txt">
+    <EmbeddedResource Include="Resources/THIRD-PARTY-NOTICES.txt">
       <LogicalName>GKMD.Resources.THIRD-PARTY-NOTICES.txt</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
@@ -84,13 +84,31 @@
 
   <ItemGroup>
     <None Include="LICENSE" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
-    <None Include="Resources\THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
+    <None Include="Resources/THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <!-- Release packaging: one zip per platform. The two Windows builds each
-       carry their architecture's usbip-win2 installer; the Linux assembly is
-       AnyCPU IL and is packaged once per Linux architecture so a host can
-       pick explicitly.
+  <!-- Native AOT is the only distribution form. A package is a native
+       shared library with the gkmd_* C ABI (see Native/GKMDNative.cs and
+       native/gkmd.h), not a managed assembly:
+         Windows : GKMD.dll
+         Linux   : libGKMD.so
+       GKME no longer consumes this as a ProjectReference; it compiles the
+       sources into its own AOT image. -->
+  <PropertyGroup>
+    <PublishAot>true</PublishAot>
+    <StripSymbols>true</StripSymbols>
+    <!-- NativeAOT is always self-contained; `dotnet build -t:Publish -r`
+         does not infer this the way `dotnet publish -r` does. -->
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
+  </PropertyGroup>
+
+  <!-- Linux shared libraries conventionally carry the `lib` prefix. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.ToLowerInvariant().Contains('linux'))">
+    <NativeBinaryPrefix>lib</NativeBinaryPrefix>
+  </PropertyGroup>
+
+  <!-- Release packaging: one zip per platform, each produced from a
+       NativeAOT publish (the build output is IL and is never shipped).
 
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
@@ -98,24 +116,30 @@
          dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 
        Produces bin\Release\GKMD-v<version>-windows-x64.zip,
-       ...-windows-arm64.zip, ...-linux-x64.zip and ...-linux-arm64.zip, each
-       containing GKMD.dll, LICENSE and THIRD-PARTY-NOTICES.txt so the notices
-       travel with every copy. -->
-  <Target Name="PackageRelease" DependsOnTargets="Build"
+       ...-windows-arm64.zip, ...-linux-x64.zip and ...-linux-arm64.zip,
+       each containing the native binary, LICENSE, THIRD-PARTY-NOTICES.txt
+       and the C header. -->
+  <Target Name="PackageRelease" DependsOnTargets="Publish"
           Condition="'$(Configuration)' == 'Release'">
+    <Error Condition="'$(RuntimeIdentifier)' == ''"
+           Text="PackageRelease requires -r &lt;rid&gt;: the artifact is a NativeAOT binary, not an AnyCPU assembly." />
     <PropertyGroup>
       <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
       <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0-windows'">windows-$(UsbipPayloadArch)</ReleaseSuffix>
       <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0' and '$(RuntimeIdentifier)' == 'linux-arm64'">linux-arm64</ReleaseSuffix>
       <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0' and '$(ReleaseSuffix)' == ''">linux-x64</ReleaseSuffix>
-      <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix)</ReleaseStageDir>
-      <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix).zip</ReleaseZipPath>
+      <ReleaseStageDir>$(MSBuildProjectDirectory)/obj/release-package/GKMD-v$(ReleaseVersion)-$(ReleaseSuffix)</ReleaseStageDir>
+      <ReleaseZipPath>$(MSBuildProjectDirectory)/bin/Release/GKMD-v$(ReleaseVersion)-$(ReleaseSuffix).zip</ReleaseZipPath>
+      <ReleaseBinary>$(PublishDir)$(NativeBinaryPrefix)$(TargetName)$(NativeBinaryExt)</ReleaseBinary>
     </PropertyGroup>
+    <Error Condition="!Exists('$(ReleaseBinary)')"
+           Text="NativeAOT output not found: $(ReleaseBinary)" />
     <RemoveDir Directories="$(ReleaseStageDir)" />
     <MakeDir Directories="$(ReleaseStageDir)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ReleaseStageDir)" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\LICENSE" DestinationFolder="$(ReleaseStageDir)" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\Resources\THIRD-PARTY-NOTICES.txt" DestinationFolder="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(ReleaseBinary)" DestinationFolder="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/LICENSE" DestinationFolder="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/Resources/THIRD-PARTY-NOTICES.txt" DestinationFolder="$(ReleaseStageDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/Native/gkmd.h" DestinationFolder="$(ReleaseStageDir)" />
     <ZipDirectory SourceDirectory="$(ReleaseStageDir)" DestinationFile="$(ReleaseZipPath)" Overwrite="true" />
     <Message Importance="high" Text="Release package: $(ReleaseZipPath)" />
   </Target>

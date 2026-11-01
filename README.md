@@ -2,14 +2,14 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-GKMD is a standalone virtual USB game controller engine (class library) that emulates USB devices in user mode through a virtual host controller (vHCI): [usbip-win2](https://github.com/vadimgrn/usbip-win2) on Windows, and mainline Linux's in-kernel `vhci_hcd` on Linux. Either way it presents a real hardware identity to the kernel-facing HID / XInput / DirectInput / SDL / Gamepad APIs.
+GKMD is a standalone virtual USB game controller engine, shipped as a NativeAOT shared library, that emulates USB devices in user mode through a virtual host controller (vHCI): [usbip-win2](https://github.com/vadimgrn/usbip-win2) on Windows, and mainline Linux's in-kernel `vhci_hcd` on Linux. Either way it presents a real hardware identity to the kernel-facing HID / XInput / DirectInput / SDL / Gamepad APIs.
 
 ## Platforms
 
 | Platform | Host controller | Preparation |
 | --- | --- | --- |
-| Windows 10 / 11 (x64, ARM64) | usbip-win2 0.9.8.1 vHCI | `net10.0-windows` build; the official installer is embedded in the assembly and deployed on request (probe-only policy) |
-| Linux (mainline, 4.x+) | in-kernel `vhci_hcd` | `net10.0` build; `sudo modprobe vhci_hcd` (or `GKContext.InstallUsbipBackend`), plus root for attach |
+| Windows 10 / 11 (x64, ARM64) | usbip-win2 0.9.8.1 vHCI | `net10.0-windows` NativeAOT build; the official installer is embedded in the native library and deployed on request (probe-only policy) |
+| Linux (mainline, 4.x+) | in-kernel `vhci_hcd` | `net10.0` NativeAOT build; `sudo modprobe vhci_hcd` (or `GKContext.InstallUsbipBackend`), plus root for attach |
 
 Linux needs no driver of GKMD's own and no downloaded installer: mainline ships both halves of USB/IP, and `vhci_hcd` is the virtual host controller that enumerates an imported device as a real one. GKMD performs the USB/IP import handshake itself and hands the connected socket to the kernel through `/sys/devices/platform/vhci_hcd.0/attach` (`port sockfd devid speed`), so it does not shell out to the `usbip` tool. A user who attaches by hand with `usbip --tcp-port <server port> attach -r 127.0.0.1 -b 1-N` also works: the server admits an import from any root process on its loopback port.
 
@@ -54,7 +54,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Audio engine | Composite personas carry USB Audio over USB/IP; the SDK installs the transport for them | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
 | Controller index / identity release | Lease + reservation system, identity keys, multi-program coexistence (a keyless 1.12.0 program lands at transport index 64+) | Tears down the USB/IP device first, then releases the index (avoids port reuse races during fast switching) |
 | Uninstall | `HMUninstall` / `HIDMaestroUninstall.exe` removes controllers, driver packages, certificate, registry keys and files; 2.0.3 can also remove usbip-win2 and its root-hub filter | No uninstall API or tool; the host app handles teardown (`UsbipBackend.DetachAllOwned`) |
-| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | Three builds of the same AnyCPU assembly: Windows x64, Windows ARM64 (each embedding only its own usbip-win2 installer) and Linux (no installer payload) |
+| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | Four NativeAOT builds: Windows x64 / ARM64 (each embedding only its own usbip-win2 installer) and Linux x64 / ARM64 (no installer payload) |
 | Diagnostic log | `DeviceOrchestrator.LogDiag` | Replaced with `Debug.WriteLine` |
 
 ### 2. Profiles and device behavior
@@ -80,13 +80,13 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | GIP over USB/IP | `Usbip/GipProtocol.cs`, `Usbip/GipResponder.cs`, `Usbip/GipLog.cs` | Xbox One (`045E:02EA`) and Xbox Series X\|S (`045E:0B12`) are vendor-class USB devices answering the full GIP handshake (HELLO / announce / identify / status), 14-byte `gip_gamepad_pkt_input`, guide virtual key, and host commands (power / LED / rumble / identify). Xbox One starts from the real 214-byte gamepad metadata and appends the PC security opt-out as a fourth interface (keeping `INavigationController`), producing a 230-byte blob; the previous 182-byte sample metadata made `xboxgip` bugcheck on create |
 | Selectable USB/IP receive mode (Windows) | `Usbip/VhciClient.cs`, `Usbip/UsbipBackend.cs` | `UsbipReceiveMode.LowLatency` (default, `wsk_events`) / `ZeroCopy` (MDL) on 0.9.8.x |
 | Probe-only installation | `Usbip/UsbipInstallRequiredException.cs`, `Usbip/UsbipRebootRequiredException.cs` | The library never installs a driver behind the host's back; the host UI turns "needs install / needs reboot" into a prompt |
-| Windows on Arm | `Usbip/UsbipDriverInstaller.cs`, `Resources/USBip-0.9.8.1-arm64.exe` | A separate ARM64 build of the same assembly carries the ARM64 installer. The payload is still chosen by the **OS** architecture, so an x64 host process under emulation installs the ARM64 driver — the only kind ARM64 Windows can load — and a build carrying the wrong payload reports that instead of running an installer that cannot work |
+| Windows on Arm | `Usbip/UsbipDriverInstaller.cs`, `Resources/USBip-0.9.8.1-arm64.exe` | A separate ARM64 NativeAOT build carries the ARM64 installer and exports the same C ABI. The payload is still chosen by the **OS** architecture, so an x64 host process under emulation installs the ARM64 driver — the only kind ARM64 Windows can load — and a build carrying the wrong payload reports that instead of running an installer that cannot work |
 | Linux (in-kernel `vhci_hcd`) | `Usbip/VhciClient.Linux.cs`, `Usbip/TcpConnectionOwner.Linux.cs`, `Usbip/UsbipDriverInstaller.Linux.cs` | The same engine with no extra kernel driver: the `OP_REQ_IMPORT` handshake runs in managed code and the socket is handed to mainline `vhci_hcd` through its sysfs `attach` file. `modprobe vhci_hcd` replaces the installer, `/proc/net/tcp` admission replaces the System-PID rule, and detach waits for the kernel's asynchronous disconnect |
 | Code-defined profile registry | `StaticProfileRegistry.cs` | Built-in personas are ordinary C# and carry no JSON or reflection dependency |
 | Code-side Sony handlers | `Usbip/SonyTestCommandHandler.cs`, `Usbip/UsbipEmulatedDevice.cs` | DualSense test commands (torch/telemetry, Type2 tracability, BT MAC/patch, battery voltage) and DualShock 4 `0x20` / `0x81` feature reports (`0x03030301` challenge response) |
 | High-resolution wheel | `UsbConfigurationSpec.ResolutionMultiplier` | Answers `GET/SET_REPORT(Feature, 0)` and enumerates at high resolution |
-| AOT-friendly library | `GKMD.csproj`, `GKLayoutLoader.cs` | `IsAotCompatible=true`; only the reflection-based layout JSON path is locally suppressed |
-| GKME integration | `AssemblyInfo.cs` | Linked by [GKME](../GKME-Windows) through `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
+| NativeAOT / C ABI | `GKMD.csproj`, `Native/GKMDNative.cs`, `Native/gkmd.h` | `PublishAot=true`; every artifact is a native shared library exporting `gkmd_*`; only the reflection-based layout JSON path is locally suppressed |
+| GKME integration | `GKME.csproj` | GKME compiles the GKMD sources into its own AOT image; the released artifact is a native C ABI library |
 
 ### 4. Upstream work GKMD has not adopted (1.6.0 → 2.0.3)
 
@@ -105,9 +105,9 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 
 | Dimension | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
-| Output | Class library `HIDMaestro.Core.dll` | Class library **`GKMD.dll`** |
+| Output | Class library `HIDMaestro.Core.dll` | NativeAOT shared library: `GKMD.dll` (Windows) / `libGKMD.so` (Linux) |
 | TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` (Windows) and `net10.0` (Linux), built from one project |
-| Platform | AnyCPU | AnyCPU |
+| Platform | AnyCPU | x64 and ARM64, one NativeAOT build per RID |
 | Namespaces | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | Directory structure | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | Flattened to the root + the `Usbip/` subdirectory |
 | Driver resources | Embeds UMDF2 driver + XUSB companion + SWD helper + INFs + signing/catalog tools + OpenVR driver + `usbip2_ude` files, for x64 and ARM64 | **Embeds no kernel or UMDF2 driver and no signing/catalog tools**; each build embeds one of `Resources/USBip-0.9.8.1-x64.exe` / `Resources/USBip-0.9.8.1-arm64.exe` plus `THIRD-PARTY-NOTICES.txt` |
@@ -117,9 +117,9 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
 | Version | `2.0.3` | `4.9.0.0` (follows GKME) |
-| AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally; the host publishes with `PublishAot` |
-| ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Two builds of one AnyCPU assembly; each embeds only its own usbip-win2 installer, and the payload is selected by OS architecture |
-| Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
+| AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `PublishAot=true`; every released artifact is native and exported through the `gkmd_*` C ABI; reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally |
+| ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Four NativeAOT builds; the Windows ARM64 build embeds only the ARM64 installer, and the payload is selected by OS architecture |
+| Host integration | Generic SDK | GKME compiles the sources into its own AOT image; consumers of the zip use the `gkmd_*` C ABI |
 
 ### 6. Removed from the 1.5.1 base (appendix)
 
@@ -214,13 +214,16 @@ Not synced from 2.0.x because they do not apply or are outside the USB/IP runtim
 
 ```
 GKMD/
-├── GKMD.csproj                 # Class library project (net10.0-windows; net10.0)
+├── GKMD.csproj                 # NativeAOT shared-library project (net10.0-windows; net10.0)
 ├── AssemblyInfo.cs             # AssemblyVersion / InternalsVisibleTo
+├── Native/                     # C ABI surface (the only public native API)
+│   ├── GKMDNative.cs           # [UnmanagedCallersOnly] gkmd_* exports
+│   └── gkmd.h                  # C header shipped with every artifact
 ├── GKContext.cs                # Top-level entry: profile catalog + controller lifecycle
 ├── GKController.cs             # A single virtual controller
 ├── GKProfile.cs / GKProfileBuilder.cs / ControllerProfile.cs
 ├── HidDescriptorBuilder.cs / HidReportBuilder.cs
-├── SharedMemoryIO.cs           # Pagefile section / event shared with the device side
+├── SharedMemoryIO.cs           # In-process block + managed events (no named kernel objects)
 ├── StaticProfileRegistry.cs    # Built-in profiles (constructed in code)
 ├── TimeoutScale.cs / GKLayout.cs / GKLayoutLoader.cs / ...
 ├── Usbip/                      # USB/IP backend
@@ -242,32 +245,43 @@ GKMD/
 
 ## Build
 
-The project targets two frameworks. A host picks the right one automatically
-through `ProjectReference`: a `net10.0-windows` host gets the usbip-win2 build,
-a `net10.0` host (Linux) gets the in-kernel `vhci_hcd` build.
+The project targets `net10.0-windows` (usbip-win2) and `net10.0` (Linux), but
+**distribution is NativeAOT**: every released artifact is a native shared
+library exporting the `gkmd_*` C ABI (`Native/GKMDNative.cs`,
+`Native/gkmd.h`). `GKMD.dll` and `libGKMD.so` are native binaries, not managed
+assemblies, and cannot be referenced with `ProjectReference`.
 
 ```powershell
-# Both targets (Windows + Linux), trim/AOT analyzers on
+# Compile IL only (analyzers / debugging); not the distribution form
 dotnet build -c Release
 
-# Linux build only: no installer payload, drives mainline vhci_hcd
-dotnet build -c Release -f net10.0
+# Native shared library
+dotnet publish -c Release -f net10.0-windows -r win-x64
+dotnet publish -c Release -f net10.0-windows -r win-arm64
+dotnet publish -c Release -f net10.0 -r linux-x64
+dotnet publish -c Release -f net10.0 -r linux-arm64
 
-# x64 Windows build: embeds the x64 usbip-win2 installer
-dotnet build -c Release -f net10.0-windows
-
-# ARM64 Windows build: the RID selects the ARM64 installer and a per-RID folder
-dotnet build -c Release -f net10.0-windows -r win-arm64
+# Release zip (runs Publish, then stages the native binary + gkmd.h + notices)
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 ```
 
-The Windows builds produce the same AnyCPU `GKMD.dll`; the only difference is
-which upstream installer it carries, so a host ships the build that matches its
-machines. Outputs land in `bin\Release\net10.0\` (Linux),
-`bin\Release\net10.0-windows\` (Windows x64) and
-`bin\Release\net10.0-windows\win-arm64\` (Windows ARM64). A host that sets its
-`RuntimeIdentifier` in its own project file instead of on the command line must
-forward the choice as well: `-p:UsbipPayloadArch=arm64` (the build fails on any
-value other than `x64` / `arm64`).
+Cross-compilation constraints:
+
+- NativeAOT cannot cross operating systems. The two Linux RIDs must be built
+  on Linux (for example inside WSL); Windows RIDs must be built on Windows.
+- Windows ARM64 needs the **MSVC ARM64/ARM64EC build tools** component in
+  Visual Studio (`Microsoft.VisualStudio.Component.VC.Tools.ARM64`).
+- Linux ARM64 on an x64 Linux host needs `aarch64-linux-gnu-objcopy` (the
+  binutils cross package) and `-p:ObjCopyName=aarch64-linux-gnu-objcopy`.
+
+The Windows x64 build embeds the x64 usbip-win2 installer and the ARM64 build
+the ARM64 one; the RID selects `UsbipPayloadArch`, and a host that sets its RID
+in its own project file can forward it explicitly with
+`-p:UsbipPayloadArch=arm64`. Any value other than `x64` / `arm64` fails the
+build.
 
 On Linux the library attaches as root and imports from the server in-process.
 The distro's `usbip` tool can attach to the same server by hand:
@@ -280,50 +294,65 @@ sudo usbip --tcp-port 37286 attach -r 127.0.0.1 -b 1-1
 (`37286` is the first port of the server's range; a running server may hold a
 later one in `37286..37301`.)
 
-GKME integration: place this repository and the GKME repository under the same parent directory; GKME references this project via `<ProjectReference Include="..\GKMD\GKMD.csproj" />`.
+GKME integration: because the released library is native, GKME compiles the
+GKMD sources into its own AOT image instead of using `ProjectReference`:
 
-## AOT support
-
-GKMD is **AOT / trimming compatible** and is meant to be linked into a Native AOT host:
-
-- `GKMD.csproj` sets `<IsAotCompatible>true</IsAotCompatible>`, so the trim / AOT / single-file analyzers run on every build. Both Debug and Release builds are warning-free (0 warnings / 0 errors).
-- The only reflection-based JSON paths (`GKLayoutLoader.cs`, `System.Text.Json` layout load/save) are annotated locally with `#pragma warning disable IL2026, IL3050`. A host that serializes layouts at runtime should keep the `GKLayout*` types alive (e.g. `JsonSerializerContext` or a trimmer root descriptor).
-- The embedded usbip-win2 payload (`Resources/USBip-0.9.8.1-x64.exe` in the x64 build, `Resources/USBip-0.9.8.1-arm64.exe` in the ARM64 build) is a manifest resource and **survives Native AOT publishing**: a host app referencing this project reads it back at full length after `dotnet publish -r win-x64 -p:PublishAot=true` (or `-r win-arm64`, which also selects the ARM64 payload).
-
-Verify it yourself:
-
-```powershell
-# 1) library build with the trim / AOT analyzers on (must stay warning-free)
-dotnet build -c Release
-
-# 2) full Native AOT publish from a host project that references GKMD.csproj
-dotnet publish -c Release -r win-x64 -p:PublishAot=true
-dotnet publish -c Release -r linux-x64 -p:PublishAot=true
+```xml
+<Compile Include="..\GKMD\**\*.cs"
+         Exclude="..\GKMD\bin\**;..\GKMD\obj\**;..\GKMD\tools\**;..\GKMD\Native\**;..\GKMD\AssemblyInfo.cs" />
+<EmbeddedResource Include="..\GKMD\Resources\USBip-0.9.8.1-$(UsbipPayloadArch).exe">
+  <LogicalName>GKMD.Resources.USBip-0.9.8.1-$(UsbipPayloadArch).exe</LogicalName>
+</EmbeddedResource>
 ```
 
-GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishTrimmed>` and links GKMD that way.
+## Native AOT and the C ABI
+
+`GKMD.csproj` sets `<PublishAot>true</PublishAot>`. Because the project is an
+`OutputType=Library`, the SDK emits a shared library (`NativeLib=Shared`) and
+exports every `[UnmanagedCallersOnly]` entry point. The managed API — classes,
+events, dictionaries, `string` — is intentionally not exported; callers use the
+opaque handles and blittable structures in `Native/gkmd.h`:
+
+| Group | Functions |
+| --- | --- |
+| Version / error | `gkmd_version`, `gkmd_last_error` |
+| Context | `gkmd_context_create/destroy`, `..._is_backend_available`, `..._install_backend`, `..._load_default_profiles`, `..._profile_count`, `..._profile_id/name/vid/pid/is_deployable` |
+| Controller | `gkmd_context_create_controller`, `gkmd_controller_destroy`, `..._submit_gamepad`, `..._submit_raw`, `..._set_output_callback`, `..._clear_output_callback` |
+
+Functions returning `int` use `0` for success and `-1` for failure;
+`gkmd_last_error()` then returns a thread-local UTF-8 message. Profile strings
+are written into a caller buffer (pass `NULL` / `0` to query the size).
+Output callbacks run on the controller's reader thread and must be fast.
+
+The embedded usbip-win2 payload survives NativeAOT publishing: the x64
+`GKMD.dll` still returns the full installer through
+`Assembly.GetManifestResourceStream`, and the ARM64 build carries the ARM64
+asset. The only reflection-based JSON paths (`GKLayoutLoader.cs`,
+`System.Text.Json` layout load/save) are annotated locally with
+`#pragma warning disable IL2026, IL3050`; a host that serializes layouts at
+runtime must keep the `GKLayout*` types alive (for example with a
+`JsonSerializerContext` or a trimmer root descriptor). The built-in profile
+catalog does not use reflection.
 
 ## Releases
 
 Starting with v4.9.0, each [GitHub Release](../../releases) attaches one zip per
 platform — `GKMD-v<version>-windows-x64.zip`,
 `GKMD-v<version>-windows-arm64.zip`, `GKMD-v<version>-linux-x64.zip` and
-`GKMD-v<version>-linux-arm64.zip` — each holding that build's `GKMD.dll`
-(Release, IL, AnyCPU), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices
-travel with every copy of the binary. The Windows zips embed only their own
-architecture's usbip-win2 installer; the Linux zips carry no installer payload
-(mainline's `vhci_hcd` is used instead) and are built once per Linux RID. Build
-all four with:
+`GKMD-v<version>-linux-arm64.zip`. Every zip contains the **NativeAOT shared
+library** built for that platform, the C header `gkmd.h`, `LICENSE` and
+`THIRD-PARTY-NOTICES.txt`:
 
-```powershell
-dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
-dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
-dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
-dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
-```
+| Platform | Binary |
+| --- | --- |
+| Windows x64 / ARM64 | `GKMD.dll` (native PE, embeds that architecture's usbip-win2 installer) |
+| Linux x64 / ARM64 | `libGKMD.so` (native ELF, no installer payload; mainline `vhci_hcd`) |
 
-Releases up to v4.8.0 attached a single RID-neutral `GKMD-v<version>.zip`. The
-release changelog lives in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+These are native libraries, not managed assemblies: use them through the
+`gkmd_*` C ABI (`gkmd.h`) or compile the sources into a .NET host (GKME does
+the latter). Releases up to v4.8.0 attached a managed `GKMD.dll` inside a
+single RID-neutral zip. The release changelog lives in
+[RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## License
 

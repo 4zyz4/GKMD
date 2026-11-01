@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 [assembly: AssemblyVersion("4.9.0.0")]
 [assembly: AssemblyFileVersion("4.9.0.0")]
 
-// The GKME application links the engine as a separate assembly but still
-// reaches into a few internals (the USB/IP transport installer in
-// particular). Keep that door open without widening the public API.
+// GKME now compiles these sources into its own AOT image, so this attribute
+// is no longer required for it. It is kept for any host that still embeds
+// GKMD as a separate managed assembly.
 [assembly: InternalsVisibleTo("GKME")]

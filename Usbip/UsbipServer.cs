@@ -60,7 +60,7 @@ internal sealed class UsbipServer : IDisposable
     /// controller's. A program in another process cannot set it, and it
     /// admits no connection another process owns. Windows only: the Linux
     /// uid rule already admits this process.</summary>
-    internal static volatile bool AdmitImportsFromThisProcess;
+    internal static volatile bool AdmitImportsFromThisProcess = false;
 
     public int Port { get; }
 

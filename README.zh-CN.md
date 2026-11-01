@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-GKMD 是一个独立的虚拟 USB 游戏控制器引擎（class library），通过虚拟主机控制器（vHCI）
+GKMD 是一个独立的虚拟 USB 游戏控制器引擎（以 NativeAOT 共享库分发），通过虚拟主机控制器（vHCI）
 在用户态模拟 USB 设备：Windows 上使用
 [usbip-win2](https://github.com/vadimgrn/usbip-win2)，Linux 上使用主线内核自带的
 `vhci_hcd`。两者都会向内核上层的 HID / XInput / DirectInput / SDL / Gamepad API
@@ -12,8 +12,8 @@ GKMD 是一个独立的虚拟 USB 游戏控制器引擎（class library），通
 
 | 平台 | 主机控制器 | 准备步骤 |
 | --- | --- | --- |
-| Windows 10 / 11（x64、ARM64） | usbip-win2 0.9.8.1 vHCI | `net10.0-windows` 构建；官方安装器内嵌在程序集里，按需部署（仅探测策略） |
-| Linux（主线内核 4.x+） | 内核自带 `vhci_hcd` | `net10.0` 构建；`sudo modprobe vhci_hcd`（或调用 `GKContext.InstallUsbipBackend`），attach 需要 root |
+| Windows 10 / 11（x64、ARM64） | usbip-win2 0.9.8.1 vHCI | `net10.0-windows` NativeAOT 构建；官方安装器内嵌在 native 库里，按需部署（仅探测策略） |
+| Linux（主线内核 4.x+） | 内核自带 `vhci_hcd` | `net10.0` NativeAOT 构建；`sudo modprobe vhci_hcd`（或调用 `GKContext.InstallUsbipBackend`），attach 需要 root |
 
 Linux **无需 GKMD 自己的驱动，也无需下载安装器**：主线内核自带 USB/IP 两端，
 `vhci_hcd` 就是把导入设备枚举成真实设备的虚拟主机控制器。GKMD 自己在托管代码里完成
@@ -77,7 +77,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 音频引擎 | 复合 persona 通过 USB/IP 承载 USB Audio，SDK 自动安装传输 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
 | 控制器索引 / 身份释放 | lease + reservation 系统、identity key、多程序并存（无 key 的 1.12.0 程序落在 transport index 64 以上） | 先拆 USB/IP 设备再释放索引（避免快速切换时端口复用竞争） |
 | 卸载 | `HMUninstall` / `HIDMaestroUninstall.exe` 移除控制器、驱动包、证书、注册表与文件；2.0.3 还可移除 usbip-win2 及其 root-hub filter | 无卸载 API / 工具；由宿主 App 自行清理（`UsbipBackend.DetachAllOwned`） |
-| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | 同一个 AnyCPU 程序集构建三次：Windows x64、Windows ARM64（各自只内嵌自己那份 usbip-win2 安装器）与 Linux（无安装器载荷） |
+| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | 四个 NativeAOT 构建：Windows x64 / ARM64（各自只内嵌自己那份 usbip-win2 安装器）与 Linux x64 / ARM64（无安装器载荷） |
 | 诊断日志 | `DeviceOrchestrator.LogDiag` | 改为 `Debug.WriteLine` |
 
 ### 2. Profile 与设备行为
@@ -103,13 +103,13 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | USB/IP 上的 GIP | `Usbip/GipProtocol.cs`、`Usbip/GipResponder.cs`、`Usbip/GipLog.cs` | Xbox One（`045E:02EA`）与 Xbox Series X\|S（`045E:0B12`）作为厂商类 USB 设备响应完整 GIP 握手（HELLO / announce / identify / status）、14 字节 `gip_gamepad_pkt_input`、guide 虚拟键，以及主机命令（power / LED / rumble / identify）。Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），形成 230 字节 blob；此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
 | 可选的 USB/IP 接收模式（Windows） | `Usbip/VhciClient.cs`、`Usbip/UsbipBackend.cs` | 0.9.8.x 上支持 `UsbipReceiveMode.LowLatency`（默认，`wsk_events`）/ `ZeroCopy`（MDL） |
 | 仅探测的安装策略 | `Usbip/UsbipInstallRequiredException.cs`、`Usbip/UsbipRebootRequiredException.cs` | 库不会在宿主意料之外安装驱动；宿主 UI 可将「需安装 / 需重启」转成提示 |
-| Windows on Arm | `Usbip/UsbipDriverInstaller.cs`、`Resources/USBip-0.9.8.1-arm64.exe` | 同一程序集的 ARM64 构建携带 ARM64 安装器。载荷仍按 **OS** 架构选择：在模拟层运行的 x64 宿主进程也会装 ARM64 驱动（ARM64 Windows 只能加载 ARM64 内核驱动）；若构建带的载荷与机器不匹配，会直接报错，而不是运行一个注定失败的安装器 |
+| Windows on Arm | `Usbip/UsbipDriverInstaller.cs`、`Resources/USBip-0.9.8.1-arm64.exe` | 独立的 ARM64 NativeAOT 构建携带 ARM64 安装器，并导出同一套 C ABI。载荷仍按 **OS** 架构选择：在模拟层运行的 x64 宿主进程也会装 ARM64 驱动（ARM64 Windows 只能加载 ARM64 内核驱动）；若构建带的载荷与机器不匹配，会直接报错，而不是运行一个注定失败的安装器 |
 | Linux（内核 `vhci_hcd`） | `Usbip/VhciClient.Linux.cs`、`Usbip/TcpConnectionOwner.Linux.cs`、`Usbip/UsbipDriverInstaller.Linux.cs` | 同一套引擎，无需额外内核驱动：`OP_REQ_IMPORT` 握手在托管代码中完成，socket 通过 sysfs `attach` 交给主线 `vhci_hcd`。`modprobe vhci_hcd` 取代安装器，`/proc/net/tcp` 准入取代 System PID 规则，detach 会等待内核的异步断开 |
 | 代码定义的 profile 注册表 | `StaticProfileRegistry.cs` | 内建 persona 就是普通 C# 代码，不依赖 JSON 或反射 |
 | 代码侧 Sony 处理器 | `Usbip/SonyTestCommandHandler.cs`、`Usbip/UsbipEmulatedDevice.cs` | DualSense 测试指令（torch/telemetry、Type2 tracability、BT MAC/patch、电池电压）与 DualShock 4 `0x20` / `0x81` feature report（`0x03030301` challenge response） |
 | 高分辨率滚轮 | `UsbConfigurationSpec.ResolutionMultiplier` | 应答 `GET/SET_REPORT(Feature, 0)`，枚举时默认高分辨率 |
-| 对 AOT 友好的类库 | `GKMD.csproj`、`GKLayoutLoader.cs` | `IsAotCompatible=true`；仅对基于反射的 layout JSON 路径做局部抑制 |
-| GKME 集成 | `AssemblyInfo.cs` | 由 [GKME](../GKME-Windows) 通过 `ProjectReference` 引用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
+| NativeAOT / C ABI | `GKMD.csproj`、`Native/GKMDNative.cs`、`Native/gkmd.h` | `PublishAot=true`；每个产物都是导出 `gkmd_*` 的 native 共享库；仅对基于反射的 layout JSON 路径做局部抑制 |
+| GKME 集成 | `GKME.csproj` | GKME 把 GKMD 源码编译进自己的 AOT 镜像；发布产物是 native C ABI 库 |
 
 ### 4. GKMD 未采用的上游工作（1.6.0 → 2.0.3）
 
@@ -128,9 +128,9 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 
 | 维度 | HIDMaestro 2.0.3 | GKMD |
 | --- | --- | --- |
-| 产物 | 类库 `HIDMaestro.Core.dll` | 类库 **`GKMD.dll`** |
+| 产物 | 类库 `HIDMaestro.Core.dll` | NativeAOT 共享库：`GKMD.dll`（Windows）/ `libGKMD.so`（Linux） |
 | TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows`（Windows）与 `net10.0`（Linux），由同一个工程构建 |
-| Platform | AnyCPU | AnyCPU |
+| Platform | AnyCPU | x64 与 ARM64，每个 RID 一个 NativeAOT 构建 |
 | 命名空间 | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | 目录结构 | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | 扁平化到根目录 + `Usbip/` 子目录 |
 | 驱动资源 | 嵌入 UMDF2 驱动 + XUSB companion + SWD helper + INF + 签名/编目工具 + OpenVR 驱动 + `usbip2_ude` 文件，x64 与 ARM64 各一套 | **不嵌入任何内核 / UMDF2 驱动及签名/编目工具**；每个构建只嵌入 `Resources/USBip-0.9.8.1-x64.exe` 或 `Resources/USBip-0.9.8.1-arm64.exe` 中的一份，外加 `THIRD-PARTY-NOTICES.txt` |
@@ -140,9 +140,9 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
 | 版本 | `2.0.3` | `4.9.0.0`（跟随 GKME） |
-| AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制；由宿主以 `PublishAot` 发布 |
-| ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 同一个 AnyCPU 程序集构建两次；每个构建只内嵌自己那份 usbip-win2 安装器，载荷按 OS 架构选择 |
-| 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
+| AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `PublishAot=true`；每个发布产物都是 native，并通过 `gkmd_*` C ABI 导出；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制 |
+| ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 四个 NativeAOT 构建；Windows ARM64 构建只内嵌 ARM64 安装器，载荷按 OS 架构选择 |
+| 宿主集成 | 通用 SDK | GKME 把源码编译进自己的 AOT 镜像；zip 的使用者通过 `gkmd_*` C ABI 调用 |
 
 ### 6. 未从 1.5.1 基线继承的组件（附录）
 
@@ -237,13 +237,16 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 
 ```
 GKMD/
-├── GKMD.csproj                 # 类库工程（net10.0-windows; net10.0）
+├── GKMD.csproj                 # NativeAOT 共享库工程（net10.0-windows; net10.0）
 ├── AssemblyInfo.cs             # AssemblyVersion / InternalsVisibleTo
+├── Native/                     # C ABI 接口层（唯一对外 native API）
+│   ├── GKMDNative.cs           # [UnmanagedCallersOnly] gkmd_* 导出
+│   └── gkmd.h                  # 随每个产物分发的 C 头文件
 ├── GKContext.cs                # 顶层入口：profile 目录 + 控制器生命周期
 ├── GKController.cs             # 单个虚拟控制器
 ├── GKProfile.cs / GKProfileBuilder.cs / ControllerProfile.cs
 ├── HidDescriptorBuilder.cs / HidReportBuilder.cs
-├── SharedMemoryIO.cs           # 与设备端共享的 pagefile section / event
+├── SharedMemoryIO.cs           # 进程内内存块 + 托管 event（无命名内核对象）
 ├── StaticProfileRegistry.cs    # 内建 profile（代码构造）
 ├── TimeoutScale.cs / GKLayout.cs / GKLayoutLoader.cs / ...
 ├── Usbip/                      # USB/IP 后端
@@ -265,32 +268,42 @@ GKMD/
 
 ## 构建
 
-本工程面向两个 TargetFramework。宿主通过 `ProjectReference` 自动选择对应的构建：
-`net10.0-windows` 宿主得到 usbip-win2 构建，`net10.0` 宿主（Linux）得到内核
-`vhci_hcd` 构建。
+工程仍面向 `net10.0-windows`（usbip-win2）与 `net10.0`（Linux），但**分发形态
+是 NativeAOT**：每个发布产物都是导出 `gkmd_*` C ABI 的 native 共享库
+（`Native/GKMDNative.cs`、`Native/gkmd.h`）。`GKMD.dll` 与 `libGKMD.so` 是
+native 二进制，不是 managed assembly，不能用 `ProjectReference` 引用。
 
 ```powershell
-# 同时构建两个目标（Windows + Linux），并开启 trim/AOT 分析器
+# 只编译 IL（分析器 / 调试用），不是分发形态
 dotnet build -c Release
 
-# 仅 Linux 构建：无安装器载荷，驱动主线 vhci_hcd
-dotnet build -c Release -f net10.0
+# 生成 native 共享库
+dotnet publish -c Release -f net10.0-windows -r win-x64
+dotnet publish -c Release -f net10.0-windows -r win-arm64
+dotnet publish -c Release -f net10.0 -r linux-x64
+dotnet publish -c Release -f net10.0 -r linux-arm64
 
-# x64 Windows 构建：内嵌 x64 的 usbip-win2 安装器
-dotnet build -c Release -f net10.0-windows
-
-# ARM64 Windows 构建：RID 会选择 ARM64 安装器，并使用按 RID 区分的输出目录
-dotnet build -c Release -f net10.0-windows -r win-arm64
+# 生成发布 zip（先 Publish，再打包 native 二进制 + gkmd.h + 许可）
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 ```
 
-Windows 的两次构建产出同一个 AnyCPU `GKMD.dll`，唯一差别是内嵌哪一份上游安装器，
-宿主按目标机器选择对应构建即可。输出分别位于 `bin\Release\net10.0\`（Linux）、
-`bin\Release\net10.0-windows\`（Windows x64）与
-`bin\Release\net10.0-windows\win-arm64\`（Windows ARM64）。若宿主在自己的工程
-文件里（而不是命令行）设置 `RuntimeIdentifier`，需要同时转发该选择：
-`-p:UsbipPayloadArch=arm64`（取值只允许 `x64` / `arm64`，否则构建报错）。
+交叉编译限制：
 
-Linux 上类库以 root 身份 attach，并在进程内完成 import。发行版自带的 `usbip`
+- NativeAOT 不支持跨操作系统编译。两个 Linux RID 必须在 Linux 上构建
+  （例如 WSL 内）；Windows RID 必须在 Windows 上构建。
+- Windows ARM64 需要 Visual Studio 的 **MSVC ARM64/ARM64EC 生成工具**
+  （`Microsoft.VisualStudio.Component.VC.Tools.ARM64`）。
+- 在 x64 Linux 上构建 Linux ARM64 需要 `aarch64-linux-gnu-objcopy`
+  （binutils 交叉包），并传 `-p:ObjCopyName=aarch64-linux-gnu-objcopy`。
+
+Windows x64 构建内嵌 x64 的 usbip-win2 安装器，ARM64 构建内嵌 ARM64 安装器；
+RID 会选择 `UsbipPayloadArch`，若宿主在自己的工程文件里设置 RID，可用
+`-p:UsbipPayloadArch=arm64` 显式转发。取值只允许 `x64` / `arm64`，否则构建报错。
+
+Linux 上 native 库以 root 身份 attach，并在进程内完成 import。发行版自带的 `usbip`
 工具也可以手动连接到同一个 server：
 
 ```bash
@@ -301,57 +314,58 @@ sudo usbip --tcp-port 37286 attach -r 127.0.0.1 -b 1-1
 （`37286` 是 server 端口段的第一个端口；正在运行的 server 可能占用了
 `37286..37301` 中靠后的一个。）
 
-GKME 集成方式：把本仓库与 GKME 仓库放在同一父目录下，GKME 通过
-`<ProjectReference Include="..\GKMD\GKMD.csproj" />` 引用本工程。
+GKME 集成：因为发布的是 native 库，GKME 把 GKMD 源码编译进自己的 AOT 镜像，
+不再使用 `ProjectReference`：
 
-## AOT 支持
-
-GKMD **兼容 AOT / trimming**，可被链接进 Native AOT 宿主程序：
-
-- `GKMD.csproj` 设置了 `<IsAotCompatible>true</IsAotCompatible>`，每次构建都会运行
-  trim / AOT / single-file 分析器，Debug 与 Release 构建均为 0 警告 / 0 错误。
-- 唯一基于反射的 JSON 路径（`GKLayoutLoader.cs`，`System.Text.Json` 的 layout
-  读写）在代码里用 `#pragma warning disable IL2026, IL3050` 就地标注；
-  运行时会序列化 layout 的宿主应保留 `GKLayout*` 类型（如 `JsonSerializerContext`
-  或 trimmer 根描述符）。
-- 内嵌的 usbip-win2 载荷（x64 构建为 `Resources/USBip-0.9.8.1-x64.exe`，
-  ARM64 构建为 `Resources/USBip-0.9.8.1-arm64.exe`）是 manifest resource，
-  **在 Native AOT 发布后依然存在**：引用本工程的宿主执行
-  `dotnet publish -r win-x64 -p:PublishAot=true`（或 `-r win-arm64`，同时会选中
-  ARM64 载荷）后，可按完整长度读回该资源。
-
-自行验证：
-
-```powershell
-# 1) 打开 trim / AOT 分析器的类库构建（必须 0 警告）
-dotnet build -c Release
-
-# 2) 在引用 GKMD.csproj 的宿主工程里做完整的 Native AOT 发布
-dotnet publish -c Release -r win-x64 -p:PublishAot=true
-dotnet publish -c Release -r linux-x64 -p:PublishAot=true
+```xml
+<Compile Include="..\GKMD\**\*.cs"
+         Exclude="..\GKMD\bin\**;..\GKMD\obj\**;..\GKMD\tools\**;..\GKMD\Native\**;..\GKMD\AssemblyInfo.cs" />
+<EmbeddedResource Include="..\GKMD\Resources\USBip-0.9.8.1-$(UsbipPayloadArch).exe">
+  <LogicalName>GKMD.Resources.USBip-0.9.8.1-$(UsbipPayloadArch).exe</LogicalName>
+</EmbeddedResource>
 ```
 
-GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishTrimmed>`
-发布，并以这种方式链接 GKMD。
+## Native AOT 与 C ABI
+
+`GKMD.csproj` 设置 `<PublishAot>true</PublishAot>`。工程是 `OutputType=Library`，
+SDK 因此生成共享库（`NativeLib=Shared`），并导出所有 `[UnmanagedCallersOnly]`
+入口。托管 API（类、事件、字典、`string`）有意不导出；调用方使用
+`Native/gkmd.h` 中的不透明句柄与 blittable 结构：
+
+| 分组 | 函数 |
+| --- | --- |
+| 版本 / 错误 | `gkmd_version`、`gkmd_last_error` |
+| Context | `gkmd_context_create/destroy`、`..._is_backend_available`、`..._install_backend`、`..._load_default_profiles`、`..._profile_count`、`..._profile_id/name/vid/pid/is_deployable` |
+| Controller | `gkmd_context_create_controller`、`gkmd_controller_destroy`、`..._submit_gamepad`、`..._submit_raw`、`..._set_output_callback`、`..._clear_output_callback` |
+
+返回 `int` 的函数用 `0` 表示成功、`-1` 表示失败；随后
+`gkmd_last_error()` 返回当前线程的 UTF-8 错误信息。profile 字符串写入调用方
+缓冲区（传 `NULL` / `0` 查询所需长度）。输出回调在控制器的读取线程上运行，
+必须保持简短。
+
+内嵌的 usbip-win2 载荷在 NativeAOT 发布后依然存在：x64 的 `GKMD.dll` 仍可通过
+`Assembly.GetManifestResourceStream` 读回完整安装器，ARM64 构建携带 ARM64
+载荷。唯一基于反射的 JSON 路径（`GKLayoutLoader.cs`，`System.Text.Json` 的
+layout 读写）在代码里用 `#pragma warning disable IL2026, IL3050` 就地标注；
+运行时会序列化 layout 的宿主必须保留 `GKLayout*` 类型（如
+`JsonSerializerContext` 或 trimmer 根描述符）。内建 profile 目录不依赖反射。
 
 ## 发布（Releases）
 
 自 v4.9.0 起，每个 [GitHub Release](../../releases) 按平台各附带一个 zip ——
 `GKMD-v<版本>-windows-x64.zip`、`GKMD-v<版本>-windows-arm64.zip`、
-`GKMD-v<版本>-linux-x64.zip` 与 `GKMD-v<版本>-linux-arm64.zip` —— 各自内含
-该构建的 `GKMD.dll`（Release、IL、AnyCPU）、`LICENSE` 与
-`THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。Windows 两个 zip
-只内嵌各自架构的 usbip-win2 安装器；Linux 两个 zip 不携带安装器载荷（改用主线
-内核的 `vhci_hcd`），并按 Linux RID 各构建一次。用以下命令生成四个包：
+`GKMD-v<版本>-linux-x64.zip` 与 `GKMD-v<版本>-linux-arm64.zip`。每个 zip 包含
+该平台的 **NativeAOT 共享库**、C 头文件 `gkmd.h`、`LICENSE` 与
+`THIRD-PARTY-NOTICES.txt`：
 
-```powershell
-dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
-dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
-dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
-dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
-```
+| 平台 | 二进制 |
+| --- | --- |
+| Windows x64 / ARM64 | `GKMD.dll`（native PE，内嵌该架构的 usbip-win2 安装器） |
+| Linux x64 / ARM64 | `libGKMD.so`（native ELF，无安装器载荷；使用主线 `vhci_hcd`） |
 
-v4.8.0 及更早的版本只附带一个 RID 无关的 `GKMD-v<版本>.zip`。变更日志见
+这些是 native 库，不是 managed assembly：通过 `gkmd_*` C ABI（`gkmd.h`）使用，
+或把源码编译进 .NET 宿主（GKME 采用后者）。v4.8.0 及更早的版本在单个 RID
+无关的 zip 中附带 managed `GKMD.dll`。变更日志见
 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ## 许可
