@@ -5,9 +5,10 @@
 **English** | [简体中文](#v490--2026-11-01--linux-支持与-windows-on-arm)
 
 GKMD 4.9.0 adds Linux support and Windows on Arm support to the same AnyCPU
-assembly. There are three builds: Windows x64 and Windows ARM64, each embedding
-exactly one official usbip-win2 0.9.8.1 installer, and Linux, which rides
-mainline's in-kernel `vhci_hcd` and needs no driver of GKMD's own.
+assembly. Release packages cover Windows x64, Windows ARM64, Linux x64 and
+Linux ARM64. The two Windows builds each embed exactly one official usbip-win2
+0.9.8.1 installer; the Linux builds ride mainline's in-kernel `vhci_hcd` and
+carry no installer payload.
 
 ### Highlights
 
@@ -105,23 +106,26 @@ mainline's in-kernel `vhci_hcd` and needs no driver of GKMD's own.
 | --- | --- | --- |
 | `GKMD-v4.9.0-windows-x64.zip` | 25,426,898 bytes | Windows x64: `GKMD.dll` (26,413,056 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
 | `GKMD-v4.9.0-windows-arm64.zip` | 18,355,046 bytes | Windows ARM64: `GKMD.dll` (19,389,952 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux.zip` | 131,648 bytes | Linux (`net10.0`): `GKMD.dll` (313,856 bytes, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-x64.zip` | 131,657 bytes | Linux x64 (`net10.0`, `linux-x64`): `GKMD.dll` (313,856 bytes, AnyCPU IL, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-arm64.zip` | 131,666 bytes | Linux ARM64 (`net10.0`, `linux-arm64`): `GKMD.dll` (313,856 bytes, AnyCPU IL, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
 
 SHA-256:
 
 - `GKMD-v4.9.0-windows-x64.zip`: `DAA07017C13CADC68B346057449626B3DA0790D40C684FA4D9CE9675F541640C`
 - `GKMD-v4.9.0-windows-arm64.zip`: `13B7CA46BCE1E9B214A99EBCDC6F9CF49457F93D7A10B95AD222661E52DA348F`
-- `GKMD-v4.9.0-linux.zip`: `E7E781028CD71C566631AEF9F9CD2C814D2EDC947B61E7933B2067FCE180092E`
+- `GKMD-v4.9.0-linux-x64.zip`: `B91FDEB740EF223E6393F03D434DBD4CFFDA07787CF1E77B4A6F5AA0BFABCD06`
+- `GKMD-v4.9.0-linux-arm64.zip`: `BAE4C34D45C7A089E4A430E36867B89013F9F15DCAB6A514CB3A5625E869E55A`
 
-Produced by the three `PackageRelease` commands above; Native AOT compilation
+Produced by the four `PackageRelease` commands above; Native AOT compilation
 happens in the host application (GKME), not in this library.
 
 ### Build / verify
 
 ```powershell
-dotnet build -c Release                        # both TFMs, 0 warnings
-dotnet build -c Release -f net10.0             # Linux only
-dotnet build -c Release -f net10.0-windows     # Windows x64
+dotnet build -c Release                          # both TFMs, 0 warnings
+dotnet build -c Release -f net10.0 -r linux-x64
+dotnet build -c Release -f net10.0 -r linux-arm64
+dotnet build -c Release -f net10.0-windows -r win-x64
 dotnet build -c Release -f net10.0-windows -r win-arm64
 ```
 
@@ -129,6 +133,8 @@ dotnet build -c Release -f net10.0-windows -r win-arm64
 
 - Linux attach requires root; there is no unprivileged helper.
 - `UsbipReceiveMode` is Windows-only and ignored by the Linux build.
+- The Linux zips contain the AnyCPU `GKMD.dll`, not a self-contained runtime;
+  the host publishes its application with its own RID.
 - One payload per Windows build: shipping the x64 DLL on Windows on Arm, or the
   ARM64 DLL on x64, is reported at install time rather than silently worked
   around.
@@ -146,8 +152,9 @@ dotnet build -c Release -f net10.0-windows -r win-arm64
 [English](#v490--2026-11-01--linux-support-and-windows-on-arm) | **简体中文**
 
 GKMD 4.9.0 在同一个 AnyCPU 程序集上加入 Linux 支持与 Windows on Arm 支持。
-共有三个构建：Windows x64 与 Windows ARM64 各自内嵌一份 usbip-win2 0.9.8.1
-官方安装器；Linux 使用主线内核自带的 `vhci_hcd`，不需要 GKMD 自己的驱动。
+发布包覆盖 Windows x64、Windows ARM64、Linux x64 与 Linux ARM64。两个 Windows
+构建各自内嵌一份 usbip-win2 0.9.8.1 官方安装器；Linux 构建使用主线内核自带的
+`vhci_hcd`，不携带安装器载荷。
 
 ### 亮点
 
@@ -232,23 +239,26 @@ GKMD 4.9.0 在同一个 AnyCPU 程序集上加入 Linux 支持与 Windows on Arm
 | --- | --- | --- |
 | `GKMD-v4.9.0-windows-x64.zip` | 25,426,898 字节 | Windows x64：`GKMD.dll`（26,413,056 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
 | `GKMD-v4.9.0-windows-arm64.zip` | 18,355,046 字节 | Windows ARM64：`GKMD.dll`（19,389,952 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux.zip` | 131,648 字节 | Linux（`net10.0`）：`GKMD.dll`（313,856 字节，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-x64.zip` | 131,657 字节 | Linux x64（`net10.0`、`linux-x64`）：`GKMD.dll`（313,856 字节，AnyCPU IL，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux-arm64.zip` | 131,666 字节 | Linux ARM64（`net10.0`、`linux-arm64`）：`GKMD.dll`（313,856 字节，AnyCPU IL，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
 
 SHA-256：
 
 - `GKMD-v4.9.0-windows-x64.zip`：`DAA07017C13CADC68B346057449626B3DA0790D40C684FA4D9CE9675F541640C`
 - `GKMD-v4.9.0-windows-arm64.zip`：`13B7CA46BCE1E9B214A99EBCDC6F9CF49457F93D7A10B95AD222661E52DA348F`
-- `GKMD-v4.9.0-linux.zip`：`E7E781028CD71C566631AEF9F9CD2C814D2EDC947B61E7933B2067FCE180092E`
+- `GKMD-v4.9.0-linux-x64.zip`：`B91FDEB740EF223E6393F03D434DBD4CFFDA07787CF1E77B4A6F5AA0BFABCD06`
+- `GKMD-v4.9.0-linux-arm64.zip`：`BAE4C34D45C7A089E4A430E36867B89013F9F15DCAB6A514CB3A5625E869E55A`
 
-分别由上文三条 `PackageRelease` 命令生成；Native AOT 编译在宿主应用（GKME）
+分别由上文四条 `PackageRelease` 命令生成；Native AOT 编译在宿主应用（GKME）
 中完成，而非本类库。
 
 ### 构建 / 验证
 
 ```powershell
-dotnet build -c Release                        # 两个目标，0 警告
-dotnet build -c Release -f net10.0             # 仅 Linux
-dotnet build -c Release -f net10.0-windows     # Windows x64
+dotnet build -c Release                          # 两个目标，0 警告
+dotnet build -c Release -f net10.0 -r linux-x64
+dotnet build -c Release -f net10.0 -r linux-arm64
+dotnet build -c Release -f net10.0-windows -r win-x64
 dotnet build -c Release -f net10.0-windows -r win-arm64
 ```
 
@@ -256,6 +266,8 @@ dotnet build -c Release -f net10.0-windows -r win-arm64
 
 - Linux 的 attach 需要 root，没有非特权 helper。
 - `UsbipReceiveMode` 仅适用于 Windows，Linux 构建忽略它。
+- Linux zip 内是 AnyCPU `GKMD.dll`，不是自包含运行时；宿主需按自己的 RID
+  发布应用。
 - 每个 Windows 构建只有一份载荷：把 x64 DLL 发到 Windows on Arm（或把 ARM64
   DLL 发到 x64）会在安装时被明确报错，而不是被静默绕过。
 - layout 序列化 / 反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT

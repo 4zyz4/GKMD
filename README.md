@@ -306,17 +306,20 @@ GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>t
 ## Releases
 
 Starting with v4.9.0, each [GitHub Release](../../releases) attaches one zip per
-artifact — `GKMD-v<version>-windows-x64.zip`,
-`GKMD-v<version>-windows-arm64.zip` and `GKMD-v<version>-linux.zip` — each
-holding that build's `GKMD.dll` (Release, IL, AnyCPU), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices travel
-with every copy of the binary. The two Windows builds embed only their own
-architecture's usbip-win2 installer; the Linux build carries no installer
-payload (mainline's `vhci_hcd` is used instead). Build all three with:
+platform — `GKMD-v<version>-windows-x64.zip`,
+`GKMD-v<version>-windows-arm64.zip`, `GKMD-v<version>-linux-x64.zip` and
+`GKMD-v<version>-linux-arm64.zip` — each holding that build's `GKMD.dll`
+(Release, IL, AnyCPU), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices
+travel with every copy of the binary. The Windows zips embed only their own
+architecture's usbip-win2 installer; the Linux zips carry no installer payload
+(mainline's `vhci_hcd` is used instead) and are built once per Linux RID. Build
+all four with:
 
 ```powershell
 dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
 dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
-dotnet build -c Release -f net10.0 -t:PackageRelease
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 ```
 
 Releases up to v4.8.0 attached a single RID-neutral `GKMD-v<version>.zip`. The

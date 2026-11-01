@@ -87,24 +87,27 @@
     <None Include="Resources\THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <!-- Release packaging: one zip per artifact. The two Windows builds each
-       carry their architecture's usbip-win2 installer; the Linux build is the
-       net10.0 assembly and carries no installer payload.
+  <!-- Release packaging: one zip per platform. The two Windows builds each
+       carry their architecture's usbip-win2 installer; the Linux assembly is
+       AnyCPU IL and is packaged once per Linux architecture so a host can
+       pick explicitly.
 
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
-         dotnet build -c Release -f net10.0 -t:PackageRelease
+         dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+         dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
 
        Produces bin\Release\GKMD-v<version>-windows-x64.zip,
-       ...-windows-arm64.zip and ...-linux.zip, each containing GKMD.dll,
-       LICENSE and THIRD-PARTY-NOTICES.txt so the notices travel with every
-       copy. -->
+       ...-windows-arm64.zip, ...-linux-x64.zip and ...-linux-arm64.zip, each
+       containing GKMD.dll, LICENSE and THIRD-PARTY-NOTICES.txt so the notices
+       travel with every copy. -->
   <Target Name="PackageRelease" DependsOnTargets="Build"
           Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
-      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0'">linux</ReleaseSuffix>
       <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0-windows'">windows-$(UsbipPayloadArch)</ReleaseSuffix>
+      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0' and '$(RuntimeIdentifier)' == 'linux-arm64'">linux-arm64</ReleaseSuffix>
+      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0' and '$(ReleaseSuffix)' == ''">linux-x64</ReleaseSuffix>
       <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix)</ReleaseStageDir>
       <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix).zip</ReleaseZipPath>
     </PropertyGroup>
