@@ -1,5 +1,156 @@
 # Release notes
 
+## v4.9.0 — 2026-11-01 — Windows on Arm (per-architecture builds)
+
+**English** | [简体中文](#v490--2026-11-01--windows-on-arm-按架构构建)
+
+GKMD 4.9.0 adds Windows on Arm support as a second build of the same assembly.
+Each build embeds exactly one official usbip-win2 0.9.8.1 installer — the x64
+build the x64 one, the ARM64 build the ARM64 one — so a host ships only the
+payload its machines can load.
+
+### Highlights
+
+- **ARM64 payload** — `Resources/USBip-0.9.8.1-arm64.exe` is the upstream
+  release asset, unmodified (19,060,408 bytes, SHA-256
+  `CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800`, matching
+  the digest the GitHub release API publishes). Like the x64 asset it is a
+  32-bit Inno Setup binary; what differs is the driver package it carries
+  (ARM64 `usbip2_ude.sys`).
+- **One payload per build** — `GKMD.csproj` selects the installer from
+  `UsbipPayloadArch`, which follows `RuntimeIdentifier` when one is given
+  (`dotnet build -r win-arm64`) and defaults to x64. The two builds therefore
+  land in `bin\Release\net10.0-windows\` (x64) and `...\win-arm64\` (ARM64),
+  and a host that sets its RID in its own project file forwards
+  `-p:UsbipPayloadArch=arm64`. Any other value fails the build.
+- **OS-architecture selection** — at run time `UsbipDriverInstaller` still
+  chooses by `RuntimeInformation.OSArchitecture`, not the process
+  architecture: an x64 host process under emulation on Windows on Arm has to
+  install the ARM64 driver, the only kind ARM64 Windows loads. When the
+  shipped build carries the other payload, extraction throws a message naming
+  the build to ship instead of running an installer that cannot work.
+  `UsbipDriverInstaller.BundledArchitecture` reports what a build carries.
+- **Per-payload verification** — each architecture carries its own SHA-256 from
+  the release API and is checked after extraction; a mismatch still deletes the
+  file and throws instead of running it. Extraction uses a per-architecture
+  temp directory (`%TEMP%\GKMD_usbip_0.9.8.1_arm64`).
+- **Nothing else changed** — the vhci IOCTL layouts in `VhciClient` contain no
+  pointer-sized fields, so the 0.9.8.1 ARM64 driver speaks the same
+  `0.9.8.1 / 0.9.8.0 / 0.9.7.x` request layouts and the existing probe still
+  discovers the installed one. `pnputil`, CfgMgr and the IPHLPAPI owner check
+  are architecture-neutral (the TCP owner row is 24 bytes on every 64-bit
+  target).
+
+### Compatibility
+
+- No public API or profile format change; controller personas are unchanged.
+- Works against an installed usbip-win2 **0.9.7.x, 0.9.8.0 or 0.9.8.1**, on x64
+  and on ARM64.
+- The x64 DLL is functionally identical to 4.8.0 apart from the diagnostics
+  above and the per-architecture temp folder.
+- The bytes on the wire and in the shared input section are unchanged.
+
+### Artifacts
+
+| File | Size | Notes |
+| --- | --- | --- |
+| `GKMD-v4.9.0-x64.zip` | 25,428,724 bytes | x64 build: `GKMD.dll` (26,416,640 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-arm64.zip` | 18,356,721 bytes | ARM64 build: `GKMD.dll` (19,393,024 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256:
+
+- `GKMD-v4.9.0-x64.zip`: `1F85FAF0991794A3E61E744CD04204AB4E3ED2DD3FC6FEA4271B4829C1319ECB`
+- `GKMD-v4.9.0-arm64.zip`: `9C8CC48FAA22CA10A6725617603BA1C3188D3B0DF882480D2268AC36A53AC2E0`
+
+Produced by `dotnet build -c Release -t:PackageRelease -r win-x64` and the same
+with `-r win-arm64`; Native AOT compilation happens in the host application
+(GKME), not in this library.
+
+### Known limitations
+
+- Windows only (`net10.0-windows`).
+- One payload per build: shipping the x64 DLL on Windows on Arm, or the ARM64
+  DLL on x64, is reported at install time rather than silently worked around.
+- Layout (de)serialization uses reflection-based `System.Text.Json`; under a
+  trimmed/AOT host the `GKLayout*` types must be preserved by the host.
+- Owner records and transport-index leases, direct usbip-win2 host-controller
+  installation and `HMUninstall` from 2.0.x remain unsynced (not applicable to
+  GKMD's transport); the ARM64 driver files come from the upstream installer,
+  not from embedded `usbip2_ude` files.
+
+---
+
+## v4.9.0 — 2026-11-01 — Windows on Arm 支持（按架构构建）
+
+[English](#v490--2026-11-01--windows-on-arm-per-architecture-builds) | **简体中文**
+
+GKMD 4.9.0 以「同一程序集的第二个构建」的方式支持 Windows on Arm。每个构建
+只内嵌一份 usbip-win2 0.9.8.1 官方安装器——x64 构建带 x64 版，ARM64 构建带
+ARM64 版——宿主只需随包分发目标机器能用的那份载荷。
+
+### 亮点
+
+- **ARM64 载荷** —— `Resources/USBip-0.9.8.1-arm64.exe` 是上游 release 原始
+  资源，未做任何修改（19,060,408 字节，SHA-256
+  `CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800`，与
+  GitHub release API 公布的摘要一致）。与 x64 载荷一样，它本身是一个 32 位
+  Inno Setup 程序，区别在于内部携带的驱动包是 ARM64 的 `usbip2_ude.sys`。
+- **每个构建一份载荷** —— `GKMD.csproj` 用 `UsbipPayloadArch` 选择安装器：
+  该属性在给出 `RuntimeIdentifier` 时跟随它（`dotnet build -r win-arm64`），
+  否则默认为 x64。因此两个构建分别落在
+  `bin\Release\net10.0-windows\`（x64）与 `...\win-arm64\`（ARM64）；若宿主
+  在自己的工程文件里设置 RID，则需转发 `-p:UsbipPayloadArch=arm64`。取值
+  只允许 `x64` / `arm64`，其他值会让构建直接失败。
+- **按 OS 架构选择** —— 运行时 `UsbipDriverInstaller` 仍依据
+  `RuntimeInformation.OSArchitecture` 而不是进程架构选择载荷：宿主 App 的
+  x64 版本在 Windows on Arm 上以模拟方式运行，但内核只加载 ARM64 驱动，因此
+  必须安装 ARM64 安装器。若随包的构建带的是另一份载荷，解包时会抛出明确
+  异常，指出应该分发哪个构建，而不是运行一个注定失败的安装器。
+  `UsbipDriverInstaller.BundledArchitecture` 可查询当前构建携带的架构。
+- **逐载荷校验** —— 每个架构各自携带 release API 公布的 SHA-256，解包后校验；
+  不匹配时仍会删除文件并抛异常，而不会执行。解包目录按架构区分
+  （`%TEMP%\GKMD_usbip_0.9.8.1_arm64`）。
+- **其余行为不变** —— `VhciClient` 的 vhci IOCTL 布局中没有指针宽度字段，
+  0.9.8.1 ARM64 驱动同样支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，
+  原有探测逻辑照常识别已安装驱动的布局。`pnputil`、CfgMgr 与 IPHLPAPI 的
+  owner 检查均与架构无关（TCP owner 行在所有 64 位目标上都是 24 字节）。
+
+### 兼容性
+
+- 无公开 API 或 profile 格式变化；各手柄人格不变。
+- 兼容已安装的 usbip-win2 **0.9.7.x、0.9.8.0、0.9.8.1**，x64 与 ARM64 均可。
+- x64 DLL 除上述诊断与按架构区分的临时目录外，功能与 4.8.0 完全一致。
+- 线上字节与共享输入 section 的字节不变。
+
+### 产物
+
+| 文件 | 大小 | 说明 |
+| --- | --- | --- |
+| `GKMD-v4.9.0-x64.zip` | 25,428,724 字节 | x64 构建：`GKMD.dll`（26,416,640 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-arm64.zip` | 18,356,721 字节 | ARM64 构建：`GKMD.dll`（19,393,024 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+
+SHA-256：
+
+- `GKMD-v4.9.0-x64.zip`：`1F85FAF0991794A3E61E744CD04204AB4E3ED2DD3FC6FEA4271B4829C1319ECB`
+- `GKMD-v4.9.0-arm64.zip`：`9C8CC48FAA22CA10A6725617603BA1C3188D3B0DF882480D2268AC36A53AC2E0`
+
+分别由 `dotnet build -c Release -t:PackageRelease -r win-x64` 与
+`dotnet build -c Release -t:PackageRelease -r win-arm64` 生成；Native AOT
+编译在宿主应用（GKME）中完成，而非本类库。
+
+### 已知限制
+
+- 仅支持 Windows（`net10.0-windows`）。
+- 每个构建只有一份载荷：把 x64 DLL 发到 Windows on Arm（或把 ARM64 DLL 发到
+  x64）会在安装时被明确报错，而不是被静默绕过。
+- layout 序列化 / 反序列化使用基于反射的 `System.Text.Json`；在被裁剪的 AOT
+  宿主中，`GKLayout*` 类型须由宿主保留。
+- 2.0.x 的 owner record 与 transport index lease、直接安装 usbip-win2 host
+  controller 与 `HMUninstall` 仍未同步（不适用于 GKMD 的传输层）；ARM64 驱动
+  文件来自上游安装器，而不是内嵌的 `usbip2_ude` 文件。
+
+---
+
 ## v4.8.0 — 2026-10-31 — HIDMaestro 2.0.x allocation-free USB/IP and submit paths
 
 **English** | [简体中文](#v480--2026-10-31--同步-hidmaestro-20x-零分配-usbip-与-submit-路径)

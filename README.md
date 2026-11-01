@@ -30,14 +30,14 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Controller creation path | Branches on `RequiresUsbipBackend`: ordinary profiles use UMDF2 + PnP, composite personas use USB/IP | **No branching; everything goes through USB/IP** (`CreateController` / `CreateControllerAt` both call `CreateUsbipController`) |
 | Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP for ordinary profiles; usbip-win2's host controller for composite personas. No kernel-mode driver | Pure USB/IP: usbip-win2 virtual host controller + vHCI, **no UMDF2 driver, no INF, no PnP device node** |
 | Device node | UMDF2 path registers a root-enumerated / SWD PnP devnode and writes friendly name / ControllerIndex; composite path is a vhci USB device | No PnP devnode; device strings come directly from USB descriptors |
-| Transport installation | Since 2.0.1 the SDK embeds the unmodified `usbip2_ude.inf` / `.sys` / `.cat` for x64 and ARM64 and registers the host controller devnode itself (`InstallHostController`); it never runs usbip-win2's installer and never installs its root-hub filter, and it records what it installed | `UsbipDriverInstaller` embeds and runs the official x64 `USBip-0.9.8.1-x64.exe` (Inno) installer |
-| usbip-win2 version | 0.9.8.1, x64 + ARM64 payloads | 0.9.8.1 installer payload (x64); `VhciClient` speaks the **0.9.8.1 / 0.9.8.0 / 0.9.7.x** request layouts and probes the installed driver for the one it has |
+| Transport installation | Since 2.0.1 the SDK embeds the unmodified `usbip2_ude.inf` / `.sys` / `.cat` for x64 and ARM64 and registers the host controller devnode itself (`InstallHostController`); it never runs usbip-win2's installer and never installs its root-hub filter, and it records what it installed | `UsbipDriverInstaller` embeds the official (Inno) installer for the build's architecture — `USBip-0.9.8.1-x64.exe` in the x64 build, `USBip-0.9.8.1-arm64.exe` in the ARM64 build — and runs it when the OS architecture calls for it |
+| usbip-win2 version | 0.9.8.1, x64 + ARM64 payloads | 0.9.8.1 installer payload, one per build (x64 / ARM64); `VhciClient` speaks the **0.9.8.1 / 0.9.8.0 / 0.9.7.x** request layouts and probes the installed driver for the one it has |
 | USB/IP receive mode | Always the IRP receive path (`wsk_events` left false); no selectable mode | Adds `UsbipReceiveMode.LowLatency` (default) / `ZeroCopy` on 0.9.8.x; 0.9.7.x always uses the MDL path |
 | Installation policy | Silently installs the bundled transport on the first composite create; `InstallDriver()` does the same for UMDF2 | **Probe only**; throws `UsbipInstallRequiredException` / `UsbipRebootRequiredException` when missing/outdated, leaving installation to the host app |
 | Audio engine | Composite personas carry USB Audio over USB/IP; the SDK installs the transport for them | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
 | Controller index / identity release | Lease + reservation system, identity keys, multi-program coexistence (a keyless 1.12.0 program lands at transport index 64+) | Tears down the USB/IP device first, then releases the index (avoids port reuse races during fast switching) |
 | Uninstall | `HMUninstall` / `HIDMaestroUninstall.exe` removes controllers, driver packages, certificate, registry keys and files; 2.0.3 can also remove usbip-win2 and its root-hub filter | No uninstall API or tool; the host app handles teardown (`UsbipBackend.DetachAllOwned`) |
-| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | AnyCPU managed DLL; the embedded usbip-win2 payload is x64-only |
+| Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | Two builds of the same AnyCPU assembly, one per architecture; each embeds only its own usbip-win2 installer |
 | Diagnostic log | `DeviceOrchestrator.LogDiag` | Replaced with `Debug.WriteLine` |
 
 ### 2. Profiles and device behavior
@@ -63,6 +63,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | GIP over USB/IP | `Usbip/GipProtocol.cs`, `Usbip/GipResponder.cs`, `Usbip/GipLog.cs` | Xbox One (`045E:02EA`) and Xbox Series X\|S (`045E:0B12`) are vendor-class USB devices answering the full GIP handshake (HELLO / announce / identify / status), 14-byte `gip_gamepad_pkt_input`, guide virtual key, and host commands (power / LED / rumble / identify). Xbox One starts from the real 214-byte gamepad metadata and appends the PC security opt-out as a fourth interface (keeping `INavigationController`), producing a 230-byte blob; the previous 182-byte sample metadata made `xboxgip` bugcheck on create |
 | Selectable USB/IP receive mode | `Usbip/VhciClient.cs`, `Usbip/UsbipBackend.cs` | `UsbipReceiveMode.LowLatency` (default, `wsk_events`) / `ZeroCopy` (MDL) on 0.9.8.x |
 | Probe-only installation | `Usbip/UsbipInstallRequiredException.cs`, `Usbip/UsbipRebootRequiredException.cs` | The library never installs a driver behind the host's back; the host UI turns "needs install / needs reboot" into a prompt |
+| Windows on Arm | `Usbip/UsbipDriverInstaller.cs`, `Resources/USBip-0.9.8.1-arm64.exe` | A separate ARM64 build of the same assembly carries the ARM64 installer. The payload is still chosen by the **OS** architecture, so an x64 host process under emulation installs the ARM64 driver — the only kind ARM64 Windows can load — and a build carrying the wrong payload reports that instead of running an installer that cannot work |
 | Code-defined profile registry | `StaticProfileRegistry.cs` | Built-in personas are ordinary C# and carry no JSON or reflection dependency |
 | Code-side Sony handlers | `Usbip/SonyTestCommandHandler.cs`, `Usbip/UsbipEmulatedDevice.cs` | DualSense test commands (torch/telemetry, Type2 tracability, BT MAC/patch, battery voltage) and DualShock 4 `0x20` / `0x81` feature reports (`0x03030301` challenge response) |
 | High-resolution wheel | `UsbConfigurationSpec.ResolutionMultiplier` | Answers `GET/SET_REPORT(Feature, 0)` and enumerates at high resolution |
@@ -91,15 +92,15 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Platform | AnyCPU | AnyCPU |
 | Namespaces | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | Directory structure | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | Flattened to the root + the `Usbip/` subdirectory |
-| Driver resources | Embeds UMDF2 driver + XUSB companion + SWD helper + INFs + signing/catalog tools + OpenVR driver + `usbip2_ude` files, for x64 and ARM64 | **Embeds no kernel or UMDF2 driver and no signing/catalog tools**; embeds only `Resources/USBip-0.9.8.1-x64.exe` and `THIRD-PARTY-NOTICES.txt` |
+| Driver resources | Embeds UMDF2 driver + XUSB companion + SWD helper + INFs + signing/catalog tools + OpenVR driver + `usbip2_ude` files, for x64 and ARM64 | **Embeds no kernel or UMDF2 driver and no signing/catalog tools**; each build embeds one of `Resources/USBip-0.9.8.1-x64.exe` / `Resources/USBip-0.9.8.1-arm64.exe` plus `THIRD-PARTY-NOTICES.txt` |
 | usbip-win2 acquisition | Build-time `prepare_usbip.ps1` unpacks the pinned 0.9.8.1 installers into per-architecture host-controller files | Embeds 0.9.8.1 directly, no download target; SHA-256 verified at runtime |
 | Profile source | 348 JSON files under `profiles/`; the 2.0.3 catalog exposes 337 built-in profiles, compiled into the assembly with source-generated JSON | No JSON resources, constructed in code by `StaticProfileRegistry.cs` |
 | Resource logical names | `HIDMaestro.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
-| Version | `2.0.3` | `4.8.0.0` (follows GKME) |
+| Version | `2.0.3` | `4.9.0.0` (follows GKME) |
 | AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `IsAotCompatible=true` (trim / AOT analyzers, 0 warnings); reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally; the host publishes with `PublishAot` |
-| ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Managed AnyCPU assembly; bundled usbip-win2 payload is x64-only |
+| ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Two builds of one AnyCPU assembly; each embeds only its own usbip-win2 installer, and the payload is selected by OS architecture |
 | Host integration | Generic SDK | Used by [GKME](../GKME-Windows) via `ProjectReference`; `InternalsVisibleTo("GKME")` exposes the transport installer |
 
 ### 6. Removed from the 1.5.1 base (appendix)
@@ -183,11 +184,11 @@ These are the 2.0.x and 2.1.0 changes that live entirely in the USB/IP transport
 
 One GKMD-specific change accompanies these: the server listens on its own `37286..37301`, clear of HIDMaestro's `18509..18524` / `28509..28524` and FlexInput's `18008`, so the two can run side by side without either taking the other's imports. If the range is full, it falls back to an OS-assigned loopback port.
 
-Not synced from 2.0.x because they do not apply or are outside the USB/IP runtime: owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), ARM64 payloads, and the 2.0 data model.
+Not synced from 2.0.x because they do not apply or are outside the USB/IP runtime: owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), and the 2.0 data model. Upstream's ARM64 *driver* payloads stay unsynced for the same reason, but GKMD ships the upstream ARM64 *installer* in a separate ARM64 build of the same assembly, so Windows on Arm is supported.
 
 #### Upstream work after 1.12.0 not synced (1.12.0 → 2.0.3)
 
-- **2.0.0** replaces the device layer with JSON data and compiled programs, adds strict profile validation with JSON paths, `HMPort`, identity keys/leases, NativeAOT, ARM64 payloads, the Wii U GameCube adapter and 337 profiles. These are architectural changes, not fixes that can be ported into GKMD's static C# registry. Its USB/IP runtime fixes are listed above and are synced.
+- **2.0.0** replaces the device layer with JSON data and compiled programs, adds strict profile validation with JSON paths, `HMPort`, identity keys/leases, NativeAOT, ARM64 payloads (GKMD now ships the upstream installers itself, in per-architecture builds), the Wii U GameCube adapter and 337 profiles. These are architectural changes, not fixes that can be ported into GKMD's static C# registry. Its USB/IP runtime fixes are listed above and are synced.
 - **2.0.1 – 2.0.3** install usbip-win2's host controller files directly, add `HMUninstall` and removal of usbip-win2's host controller and root-hub filter, and correct the Valve personas. GKMD deliberately keeps the official usbip-win2 installer and the probe-only install policy, and has no Valve personas to correct.
 - 1.6.0 – 1.12.0 features such as VR, Valve personas, Switch 2 Pro, keyboard/mouse profiles, PS Move and DualShock 3 pressure are new personas or APIs rather than fixes; see section 4.
 
@@ -213,15 +214,28 @@ GKMD/
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
 └── Resources/
-    ├── USBip-0.9.8.1-x64.exe
+    ├── USBip-0.9.8.1-x64.exe    # upstream Inno installer, embedded by the x64 build
+    ├── USBip-0.9.8.1-arm64.exe  # upstream Inno installer, embedded by the ARM64 build
     └── THIRD-PARTY-NOTICES.txt
 ```
 
 ## Build
 
 ```powershell
+# x64 build: embeds the x64 usbip-win2 installer
 dotnet build -c Release
+
+# ARM64 build: the RID selects the ARM64 installer and a per-RID output folder
+dotnet build -c Release -r win-arm64
 ```
+
+Both produce the same AnyCPU `GKMD.dll`; the only difference is which upstream
+installer it carries, so a host ships the build that matches its machines.
+Outputs land in `bin\Release\net10.0-windows\` (x64) and
+`bin\Release\net10.0-windows\win-arm64\` (ARM64). A host that sets its
+`RuntimeIdentifier` in its own project file instead of on the command line must
+forward the choice as well: `-p:UsbipPayloadArch=arm64` (the build fails on any
+value other than `x64` / `arm64`).
 
 GKME integration: place this repository and the GKME repository under the same parent directory; GKME references this project via `<ProjectReference Include="..\GKMD\GKMD.csproj" />`.
 
@@ -231,7 +245,7 @@ GKMD is **AOT / trimming compatible** and is meant to be linked into a Native AO
 
 - `GKMD.csproj` sets `<IsAotCompatible>true</IsAotCompatible>`, so the trim / AOT / single-file analyzers run on every build. Both Debug and Release builds are warning-free (0 warnings / 0 errors).
 - The only reflection-based JSON paths (`GKLayoutLoader.cs`, `System.Text.Json` layout load/save) are annotated locally with `#pragma warning disable IL2026, IL3050`. A host that serializes layouts at runtime should keep the `GKLayout*` types alive (e.g. `JsonSerializerContext` or a trimmer root descriptor).
-- The embedded usbip-win2 payload (`Resources/USBip-0.9.8.1-x64.exe`) is a manifest resource and **survives Native AOT publishing**: a host app referencing this project reads it back at full length after `dotnet publish -r win-x64 -p:PublishAot=true`.
+- The embedded usbip-win2 payload (`Resources/USBip-0.9.8.1-x64.exe` in the x64 build, `Resources/USBip-0.9.8.1-arm64.exe` in the ARM64 build) is a manifest resource and **survives Native AOT publishing**: a host app referencing this project reads it back at full length after `dotnet publish -r win-x64 -p:PublishAot=true` (or `-r win-arm64`, which also selects the ARM64 payload).
 
 Verify it yourself:
 
@@ -247,7 +261,19 @@ GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>t
 
 ## Releases
 
-Starting with v4.5.2, each [GitHub Release](../../releases) attaches a single `GKMD-v<version>.zip` (Release, IL, RID-neutral AnyCPU) containing `GKMD.dll`, `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices travel with every copy of the binary. Build it with `dotnet build -c Release -t:PackageRelease`; the release changelog lives in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+Starting with v4.9.0, each [GitHub Release](../../releases) attaches one zip per
+architecture — `GKMD-v<version>-x64.zip` and `GKMD-v<version>-arm64.zip` — each
+holding that architecture's `GKMD.dll` (Release, IL, AnyCPU, one embedded
+usbip-win2 installer), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices
+travel with every copy of the binary. Build both with:
+
+```powershell
+dotnet build -c Release -t:PackageRelease -r win-x64
+dotnet build -c Release -t:PackageRelease -r win-arm64
+```
+
+Releases up to v4.8.0 attached a single RID-neutral `GKMD-v<version>.zip`. The
+release changelog lives in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## License
 

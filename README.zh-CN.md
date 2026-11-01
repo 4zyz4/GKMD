@@ -39,14 +39,14 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 控制器创建路径 | 按 `RequiresUsbipBackend` 分支：普通 profile 走 UMDF2 + PnP，复合 persona 走 USB/IP | **无分支，全部走 USB/IP**（`CreateController` / `CreateControllerAt` 均调用 `CreateUsbipController`） |
 | 驱动模型 | 普通 profile 使用 UMDF2 用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP；复合 persona 使用 usbip-win2 虚拟主机控制器。无内核态驱动 | 纯 USB/IP：usbip-win2 虚拟主机控制器 + vHCI，**无 UMDF2 驱动、无 INF、无 PnP 设备节点** |
 | 设备节点 | UMDF2 路径创建 root-enumerated / SWD PnP devnode，写入 friendly name / ControllerIndex；复合路径是 vhci USB 设备 | 无 PnP devnode，设备字符串直接来自 USB 描述符 |
-| 传输安装 | 2.0.1 起直接嵌入未修改的 x64 / ARM64 `usbip2_ude.inf` / `.sys` / `.cat`，由 SDK 自己注册 host controller devnode（`InstallHostController`）；不运行 usbip-win2 安装器，不安装其 root-hub filter，并记录安装内容 | `UsbipDriverInstaller` 嵌入并运行官方 x64 `USBip-0.9.8.1-x64.exe`（Inno）安装器 |
-| usbip-win2 版本 | 0.9.8.1，x64 + ARM64 载荷 | 0.9.8.1 安装器载荷（x64）；`VhciClient` 支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，并探测已安装驱动实际支持的布局 |
+| 传输安装 | 2.0.1 起直接嵌入未修改的 x64 / ARM64 `usbip2_ude.inf` / `.sys` / `.cat`，由 SDK 自己注册 host controller devnode（`InstallHostController`）；不运行 usbip-win2 安装器，不安装其 root-hub filter，并记录安装内容 | `UsbipDriverInstaller` 按构建架构嵌入官方（Inno）安装器——x64 构建带 `USBip-0.9.8.1-x64.exe`，ARM64 构建带 `USBip-0.9.8.1-arm64.exe`——并在 OS 架构匹配时运行 |
+| usbip-win2 版本 | 0.9.8.1，x64 + ARM64 载荷 | 0.9.8.1 安装器载荷，每个构建一份（x64 / ARM64）；`VhciClient` 支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，并探测已安装驱动实际支持的布局 |
 | USB/IP 接收模式 | 始终走 IRP 接收路径（`wsk_events` 保持 false），无可选模式 | 0.9.8.x 上新增 `UsbipReceiveMode.LowLatency`（默认）/ `ZeroCopy`；0.9.7.x 始终走 MDL 路径 |
 | 安装策略 | 首次创建复合 persona 时静默安装内嵌传输；`InstallDriver()` 对 UMDF2 做同样的事 | 仅**探测**，缺失/过旧时抛 `UsbipInstallRequiredException` / `UsbipRebootRequiredException`，由宿主 App 显式安装 |
 | 音频引擎 | 复合 persona 通过 USB/IP 承载 USB Audio，SDK 自动安装传输 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
 | 控制器索引 / 身份释放 | lease + reservation 系统、identity key、多程序并存（无 key 的 1.12.0 程序落在 transport index 64 以上） | 先拆 USB/IP 设备再释放索引（避免快速切换时端口复用竞争） |
 | 卸载 | `HMUninstall` / `HIDMaestroUninstall.exe` 移除控制器、驱动包、证书、注册表与文件；2.0.3 还可移除 usbip-win2 及其 root-hub filter | 无卸载 API / 工具；由宿主 App 自行清理（`UsbipBackend.DetachAllOwned`） |
-| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | AnyCPU 托管 DLL；内嵌 usbip-win2 载荷仅 x64 |
+| 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | 同一个 AnyCPU 程序集按架构构建两次，每个构建只内嵌自己那份 usbip-win2 安装器 |
 | 诊断日志 | `DeviceOrchestrator.LogDiag` | 改为 `Debug.WriteLine` |
 
 ### 2. Profile 与设备行为
@@ -72,6 +72,7 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | USB/IP 上的 GIP | `Usbip/GipProtocol.cs`、`Usbip/GipResponder.cs`、`Usbip/GipLog.cs` | Xbox One（`045E:02EA`）与 Xbox Series X\|S（`045E:0B12`）作为厂商类 USB 设备响应完整 GIP 握手（HELLO / announce / identify / status）、14 字节 `gip_gamepad_pkt_input`、guide 虚拟键，以及主机命令（power / LED / rumble / identify）。Xbox One 以真实手柄的 214 字节 gamepad 元数据为基础，把 PC security opt-out 追加为第 4 个 interface（保留 `INavigationController`），形成 230 字节 blob；此前的 182 字节示例元数据会让 `xboxgip` 在创建设备时 bugcheck |
 | 可选的 USB/IP 接收模式 | `Usbip/VhciClient.cs`、`Usbip/UsbipBackend.cs` | 0.9.8.x 上支持 `UsbipReceiveMode.LowLatency`（默认，`wsk_events`）/ `ZeroCopy`（MDL） |
 | 仅探测的安装策略 | `Usbip/UsbipInstallRequiredException.cs`、`Usbip/UsbipRebootRequiredException.cs` | 库不会在宿主意料之外安装驱动；宿主 UI 可将「需安装 / 需重启」转成提示 |
+| Windows on Arm | `Usbip/UsbipDriverInstaller.cs`、`Resources/USBip-0.9.8.1-arm64.exe` | 同一程序集的 ARM64 构建携带 ARM64 安装器。载荷仍按 **OS** 架构选择：在模拟层运行的 x64 宿主进程也会装 ARM64 驱动（ARM64 Windows 只能加载 ARM64 内核驱动）；若构建带的载荷与机器不匹配，会直接报错，而不是运行一个注定失败的安装器 |
 | 代码定义的 profile 注册表 | `StaticProfileRegistry.cs` | 内建 persona 就是普通 C# 代码，不依赖 JSON 或反射 |
 | 代码侧 Sony 处理器 | `Usbip/SonyTestCommandHandler.cs`、`Usbip/UsbipEmulatedDevice.cs` | DualSense 测试指令（torch/telemetry、Type2 tracability、BT MAC/patch、电池电压）与 DualShock 4 `0x20` / `0x81` feature report（`0x03030301` challenge response） |
 | 高分辨率滚轮 | `UsbConfigurationSpec.ResolutionMultiplier` | 应答 `GET/SET_REPORT(Feature, 0)`，枚举时默认高分辨率 |
@@ -100,15 +101,15 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | Platform | AnyCPU | AnyCPU |
 | 命名空间 | `HIDMaestro` / `.Internal` / `.Internal.Usbip` | `GKMD` / `.Internal` / `.Internal.Usbip` |
 | 目录结构 | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | 扁平化到根目录 + `Usbip/` 子目录 |
-| 驱动资源 | 嵌入 UMDF2 驱动 + XUSB companion + SWD helper + INF + 签名/编目工具 + OpenVR 驱动 + `usbip2_ude` 文件，x64 与 ARM64 各一套 | **不嵌入任何内核 / UMDF2 驱动及签名/编目工具**，仅嵌入 `Resources/USBip-0.9.8.1-x64.exe` 与 `THIRD-PARTY-NOTICES.txt` |
+| 驱动资源 | 嵌入 UMDF2 驱动 + XUSB companion + SWD helper + INF + 签名/编目工具 + OpenVR 驱动 + `usbip2_ude` 文件，x64 与 ARM64 各一套 | **不嵌入任何内核 / UMDF2 驱动及签名/编目工具**；每个构建只嵌入 `Resources/USBip-0.9.8.1-x64.exe` 或 `Resources/USBip-0.9.8.1-arm64.exe` 中的一份，外加 `THIRD-PARTY-NOTICES.txt` |
 | usbip-win2 获取 | 构建时由 `prepare_usbip.ps1` 解包固定版本的 0.9.8.1 安装器，生成各架构 host controller 文件 | 直接嵌入 0.9.8.1，无下载目标；运行时校验 SHA-256 |
 | Profile 来源 | `profiles/` 下 348 个 JSON 文件；2.0.3 目录暴露 337 个内建 profile，以 source-generated JSON 编译进程序集 | 无 JSON 资源，由 `StaticProfileRegistry.cs` 代码构造 |
 | 资源逻辑名 | `HIDMaestro.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
-| 版本 | `2.0.3` | `4.8.0.0`（跟随 GKME） |
+| 版本 | `2.0.3` | `4.9.0.0`（跟随 GKME） |
 | AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `IsAotCompatible=true`（trim / AOT 分析器，0 警告）；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制；由宿主以 `PublishAot` 发布 |
-| ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 托管 AnyCPU 程序集；捆绑的 usbip-win2 载荷仅 x64 |
+| ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 同一个 AnyCPU 程序集构建两次；每个构建只内嵌自己那份 usbip-win2 安装器，载荷按 OS 架构选择 |
 | 宿主集成 | 通用 SDK | 供 [GKME](../GKME-Windows) 通过 `ProjectReference` 使用；`InternalsVisibleTo("GKME")` 暴露传输安装器 |
 
 ### 6. 未从 1.5.1 基线继承的组件（附录）
@@ -192,11 +193,11 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 
 另有一项 GKMD 自身的调整：server 监听自己的 `37286..37301`，避开 HIDMaestro 的 `18509..18524` / `28509..28524` 与 FlexInput 的 `18008`，两者可并存而不会互相接管对方的 import。该段用完后回退到 OS 分配的 loopback 端口。
 
-以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略）、ARM64 载荷，以及 2.0 数据模型。
+以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略），以及 2.0 数据模型。上游的 ARM64 **驱动**载荷同样未同步，但 GKMD 在同一个程序集的独立 ARM64 构建中内嵌上游 ARM64 **安装器**，因此已支持 Windows on Arm。
 
 #### 1.12.0 之后未同步的上游工作（1.12.0 → 2.0.3）
 
-- **2.0.0** 把设备层换成 JSON 数据 + 编译程序，新增带 JSON 路径的严格 profile 校验、`HMPort`、identity key / lease、NativeAOT、ARM64 载荷、Wii U GameCube 适配器与 337 个 profile。这些是架构性改动，无法直接移植进 GKMD 的静态 C# 注册表；其中 USB/IP 运行时的修复已列在上方并已同步。
+- **2.0.0** 把设备层换成 JSON 数据 + 编译程序，新增带 JSON 路径的严格 profile 校验、`HMPort`、identity key / lease、NativeAOT、ARM64 载荷（GKMD 现已自行内嵌上游安装器，并按架构分别构建）、Wii U GameCube 适配器与 337 个 profile。这些是架构性改动，无法直接移植进 GKMD 的静态 C# 注册表；其中 USB/IP 运行时的修复已列在上方并已同步。
 - **2.0.1 – 2.0.3** 直接安装 usbip-win2 host controller 文件，新增 `HMUninstall` 与 usbip-win2 host controller / root-hub filter 移除，并修正 Valve persona。GKMD 有意保留官方 usbip-win2 安装器与仅探测的安装策略，也没有 Valve persona 需要修正。
 - 1.6.0 – 1.12.0 之间的 VR、Valve persona、Switch 2 Pro、键盘/鼠标 profile、PS Move、DualShock 3 压力等属于新 persona 或新 API，而非可移植修复；见第 4 节。
 
@@ -222,15 +223,27 @@ GKMD/
 │   ├── GipProtocol.cs / GipResponder.cs / GipLog.cs
 │   └── SonyTestCommandHandler.cs
 └── Resources/
-    ├── USBip-0.9.8.1-x64.exe
+    ├── USBip-0.9.8.1-x64.exe    # 上游 Inno 安装器，由 x64 构建嵌入
+    ├── USBip-0.9.8.1-arm64.exe  # 上游 Inno 安装器，由 ARM64 构建嵌入
     └── THIRD-PARTY-NOTICES.txt
 ```
 
 ## 构建
 
 ```powershell
+# x64 构建：内嵌 x64 的 usbip-win2 安装器
 dotnet build -c Release
+
+# ARM64 构建：RID 会选择 ARM64 安装器，并使用按 RID 区分的输出目录
+dotnet build -c Release -r win-arm64
 ```
+
+两次构建产出同一个 AnyCPU `GKMD.dll`，唯一差别是内嵌哪一份上游安装器，宿主
+按目标机器选择对应构建即可。输出分别位于
+`bin\Release\net10.0-windows\`（x64）与
+`bin\Release\net10.0-windows\win-arm64\`（ARM64）。若宿主在自己的工程文件里
+（而不是命令行）设置 `RuntimeIdentifier`，需要同时转发该选择：
+`-p:UsbipPayloadArch=arm64`（取值只允许 `x64` / `arm64`，否则构建报错）。
 
 GKME 集成方式：把本仓库与 GKME 仓库放在同一父目录下，GKME 通过
 `<ProjectReference Include="..\GKMD\GKMD.csproj" />` 引用本工程。
@@ -245,9 +258,11 @@ GKMD **兼容 AOT / trimming**，可被链接进 Native AOT 宿主程序：
   读写）在代码里用 `#pragma warning disable IL2026, IL3050` 就地标注；
   运行时会序列化 layout 的宿主应保留 `GKLayout*` 类型（如 `JsonSerializerContext`
   或 trimmer 根描述符）。
-- 内嵌的 usbip-win2 载荷（`Resources/USBip-0.9.8.1-x64.exe`）是 manifest
-  resource，**在 Native AOT 发布后依然存在**：引用本工程的宿主执行
-  `dotnet publish -r win-x64 -p:PublishAot=true` 后，可按完整长度读回该资源。
+- 内嵌的 usbip-win2 载荷（x64 构建为 `Resources/USBip-0.9.8.1-x64.exe`，
+  ARM64 构建为 `Resources/USBip-0.9.8.1-arm64.exe`）是 manifest resource，
+  **在 Native AOT 发布后依然存在**：引用本工程的宿主执行
+  `dotnet publish -r win-x64 -p:PublishAot=true`（或 `-r win-arm64`，同时会选中
+  ARM64 载荷）后，可按完整长度读回该资源。
 
 自行验证：
 
@@ -264,10 +279,18 @@ GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishT
 
 ## 发布（Releases）
 
-自 v4.5.2 起，每个 [GitHub Release](../../releases) 附带一个 `GKMD-v<版本>.zip`
-（Release、IL、AnyCPU，RID 无关），内含 `GKMD.dll`、`LICENSE` 与
-`THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。使用
-`dotnet build -c Release -t:PackageRelease` 生成，变更日志见
+自 v4.9.0 起，每个 [GitHub Release](../../releases) 按架构各附带一个 zip ——
+`GKMD-v<版本>-x64.zip` 与 `GKMD-v<版本>-arm64.zip` —— 各自内含该架构的
+`GKMD.dll`（Release、IL、AnyCPU，仅内嵌一份 usbip-win2 安装器）、`LICENSE`
+与 `THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制副本分发。用以下命令
+同时生成两个包：
+
+```powershell
+dotnet build -c Release -t:PackageRelease -r win-x64
+dotnet build -c Release -t:PackageRelease -r win-arm64
+```
+
+v4.8.0 及更早的版本只附带一个 RID 无关的 `GKMD-v<版本>.zip`。变更日志见
 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ## 许可
