@@ -45,9 +45,10 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 
 - 上游项目：https://github.com/hifihedgehog/HIDMaestro
 - 来源版本：`v1.5.1`
-- **对比的上游基线：`v2.0.3`**（2026-10-22），API 与行为的对比以其为准。该版本已把设备行为迁到 JSON profile +
-  编译程序，并带有 identity key、传输自动安装、卸载、VR 与 ARM64 载荷；同时改动了公开 API，
-  1.x 程序必须迁移到 2.0。2.1.0 的零分配 submit 路径另行同步。
+- **对比的上游基线：`v2.1.0`**（2026-10-27），API 与行为的对比以其为准。2.0 已把设备行为迁到 JSON profile +
+  编译程序，并带有 identity key、传输自动安装、卸载、VR 与 ARM64 载荷；2.1.0 重做了帧投递（每帧只到一次、按序、
+  高负载下也不丢），让 Xbox 360 家族在系统睡眠后仍存活，提高驱动宿主进程与设备时钟的优先级，把 profile 对象改为
+  快照返回，并削减 SDK、驱动与 USB/IP 传输中每帧的工作量。公开 API 在 2.0 已改动，1.x 程序必须迁移到 2.0。
 - 上游许可：MIT License（见 `LICENSE`，GKMD 保留原始版权声明）
 - 命名空间：`HIDMaestro` / `HIDMaestro.Internal` / `HIDMaestro.Internal.Usbip`
   → `GKMD` / `GKMD.Internal` / `GKMD.Internal.Usbip`
@@ -57,18 +58,18 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
   → `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*`
 
 > 注意：GKMD 是 GKME 项目内长期演进后的驱动分支的独立化产物，**不是** HIDMaestro 1.5.1 的
-> 逐行精简单文件拷贝。本文档除特别标注「1.5.1 基线」的行外，均以**最新上游 v2.0.3** 为对比对象。
-> 由于 GKMD 停留在 1.5.1 派生 API 上，它同样缺少上游 1.6.0 至 2.0.3 中依赖 2.0 数据模型的改动；
-> 其中 USB/IP 运行时代码的修复已同步到 2.0.3。
+> 逐行精简单文件拷贝。本文档除特别标注「1.5.1 基线」的行外，均以**最新上游 v2.1.0** 为对比对象。
+> 由于 GKMD 停留在 1.5.1 派生 API 上，它同样缺少上游 1.6.0 至 2.1.0 中依赖 2.0 数据模型或 UMDF2 驱动的改动；
+> 其中适用于纯 USB/IP 的 USB/IP 运行时修复与 2.1.0 零分配路径已同步，未同步项见第 7 节。
 
-## 与 HIDMaestro 2.0.3 的差异
+## 与 HIDMaestro 2.1.0 的差异
 
 ### 1. 传输 / 驱动架构
 
-| 维度 | HIDMaestro 2.0.3 | GKMD |
+| 维度 | HIDMaestro 2.1.0 | GKMD |
 | --- | --- | --- |
 | 控制器创建路径 | 按 `RequiresUsbipBackend` 分支：普通 profile 走 UMDF2 + PnP，复合 persona 走 USB/IP | **无分支，全部走 USB/IP**（`CreateController` / `CreateControllerAt` 均调用 `CreateUsbipController`） |
-| 驱动模型 | 普通 profile 使用 UMDF2 用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP；复合 persona 使用 usbip-win2 虚拟主机控制器。无内核态驱动 | 纯 USB/IP：Windows 上为 usbip-win2 虚拟主机控制器 + vHCI，Linux 上为主线内核自带的 `vhci_hcd`，**无 UMDF2 驱动、无 INF、无 PnP 设备节点** |
+| 驱动模型 | 普通 profile 使用 UMDF2 用户模式驱动 `HIDMaestro.dll` + XUSB companion + INF / PnP；复合 persona 使用 usbip-win2 虚拟主机控制器。无内核态驱动。2.1.0 驱动在创建设备前放弃 power policy，因此 10 个 Xbox 360 profile 能在系统睡眠后存活 | 纯 USB/IP：Windows 上为 usbip-win2 虚拟主机控制器 + vHCI，Linux 上为主线内核自带的 `vhci_hcd`，**无 UMDF2 驱动、无 INF、无 PnP 设备节点** |
 | 设备节点 | UMDF2 路径创建 root-enumerated / SWD PnP devnode，写入 friendly name / ControllerIndex；复合路径是 vhci USB 设备 | 无 PnP devnode，设备字符串直接来自 USB 描述符 |
 | 传输安装 | 2.0.1 起直接嵌入未修改的 x64 / ARM64 `usbip2_ude.inf` / `.sys` / `.cat`，由 SDK 自己注册 host controller devnode（`InstallHostController`）；不运行 usbip-win2 安装器，不安装其 root-hub filter，并记录安装内容 | `UsbipDriverInstaller` 按构建架构嵌入官方（Inno）安装器——x64 构建带 `USBip-0.9.8.1-x64.exe`，ARM64 构建带 `USBip-0.9.8.1-arm64.exe`——并在 OS 架构匹配时运行 |
 | usbip-win2 版本 | 0.9.8.1，x64 + ARM64 载荷 | 0.9.8.1 安装器载荷，每个构建一份（x64 / ARM64）；`VhciClient` 支持 **0.9.8.1 / 0.9.8.0 / 0.9.7.x** 三套请求布局，并探测已安装驱动实际支持的布局 |
@@ -76,13 +77,13 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | 安装策略 | 首次创建复合 persona 时静默安装内嵌传输；`InstallDriver()` 对 UMDF2 做同样的事 | 仅**探测**，缺失/过旧时抛 `UsbipInstallRequiredException` / `UsbipRebootRequiredException`，由宿主 App 显式安装 |
 | 音频引擎 | 复合 persona 通过 USB/IP 承载 USB Audio，SDK 自动安装传输 | `UsbAudioEngine?`，仅当 profile 声明了 USB Audio 流接口时才创建 |
 | 控制器索引 / 身份释放 | lease + reservation 系统、identity key、多程序并存（无 key 的 1.12.0 程序落在 transport index 64 以上） | 先拆 USB/IP 设备再释放索引（避免快速切换时端口复用竞争） |
-| 卸载 | `HMUninstall` / `HIDMaestroUninstall.exe` 移除控制器、驱动包、证书、注册表与文件；2.0.3 还可移除 usbip-win2 及其 root-hub filter | 无卸载 API / 工具；由宿主 App 自行清理（`UsbipBackend.DetachAllOwned`） |
+| 卸载 | `HMUninstall` / `HIDMaestroUninstall.exe` 移除控制器、驱动包、证书、注册表与文件；2.1.0 还可移除 usbip-win2 及其 root-hub filter，并且只在设备已离开设备树后才删除其记录 | 无卸载 API / 工具；由宿主 App 自行清理（`UsbipBackend.DetachAllOwned`） |
 | 架构 | 单个 AnyCPU DLL 内含 x64 与 ARM64 的驱动和传输载荷 | 四个 NativeAOT 构建：Windows x64 / ARM64（各自只内嵌自己那份 usbip-win2 安装器）与 Linux x64 / ARM64（无安装器载荷） |
 | 诊断日志 | `DeviceOrchestrator.LogDiag` | 改为 `Debug.WriteLine` |
 
 ### 2. Profile 与设备行为
 
-| 维度 | HIDMaestro 2.0.3 | GKMD |
+| 维度 | HIDMaestro 2.1.0 | GKMD |
 | --- | --- | --- |
 | Profile 来源 | 337 个内建 profile（其中 103 个键盘/鼠标），从 `profiles/**/*.json` 链接；支持运行时自定义 / 提取 profile；严格校验的 source-generated JSON | 由 `StaticProfileRegistry.cs` 以代码构造的 10 个 persona；**无 JSON 目录、无 profile 提取** |
 | Profile 校验 | 严格 schema；被拒文件记入 `HMContext.ProfileLoadIssues` 并给出 JSON 路径；代码构造的 profile 抛出带 `ProfileId` / `JsonPath` 的 `HMProfileException` | C# 编译期构造；无 schema / JSON 路径诊断 |
@@ -111,22 +112,23 @@ GKMD **修改自 [hifihedgehog/HIDMaestro](https://github.com/hifihedgehog/HIDMa
 | NativeAOT / C ABI | `GKMD.csproj`、`Native/GKMDNative.cs`、`Native/gkmd.h` | `PublishAot=true`；每个产物都是导出 `gkmd_*` 的 native 共享库；仅对基于反射的 layout JSON 路径做局部抑制 |
 | GKME 集成 | `GKME.csproj` | GKME 把 GKMD 源码编译进自己的 AOT 镜像；发布产物是 native C ABI 库 |
 
-### 4. GKMD 未采用的上游工作（1.6.0 → 2.0.3）
+### 4. GKMD 未采用的上游工作（1.6.0 → 2.1.0）
 
-只同步了适用于纯 USB/IP 架构、且截至 1.12.0 已存在的修复。以下上游工作没有进入 GKMD：
+只同步了适用于纯 USB/IP 架构的修复。以下上游工作没有进入 GKMD：
 
 - **1.6.0 – 1.7.3**：虚拟 VR 控制器与 OpenVR 驱动、Valve persona（Steam Controller、Steam Deck）、Steam Controller 2 raw report、Xbox 360 家族的 WGI gamepad 呈现、legacy `GetControllerState`、原生二进制版本标记。
 - **1.8.0 – 1.12.0**：身份 / 音频 / DualShock 4 修复（其中与 USB/IP 相关的**已同步**，见下文）、带 motion 的 Switch 2 Pro（1.11.0）、103 个键盘/鼠标 profile 与键盘鼠标 API（1.12.0），以及其它 catalog 与 persona 工作。
 - **2.0.0**：devices-as-data 的 report 字段、feature 应答、协议与 report 程序；`ProgramForm` 编译器 / 解释器；`deviceModelFrom` 模型；带 JSON 路径的严格 profile 校验；`HMPort`；identity key 与 lease；`HMBuildInfo`；NativeAOT 支持；ARM64 驱动/传输载荷；Wii U GameCube 适配器；PS Move 与 DualShock 3 的数据化形态；337 个 profile 目录。
 - **2.0.1 – 2.0.3**：不运行 usbip-win2 安装器而直接安装其 host controller 文件、`HMUninstall` / `HIDMaestroUninstall.exe`、移除 usbip-win2 host controller 与 root-hub filter，以及 Valve persona 修正。
+- **2.1.0**：新驱动构建（放弃 power policy，使 Xbox 360 家族在睡眠后存活）、所有驱动宿主进程使用 `UmdfHostPriority = PriorityHigh`、设备时钟使用最高优先级、先询问设备再删除且在拒绝时后台重试的移除/清理规则、更长的 `hmswd.exe` 与 `pnputil` 等待、Xbox 360 companion 按 xusb22 规则完成所有读者的等待、profile 对象改为快照返回，以及 VR submit / haptic slot 加锁。适用于纯 USB/IP 引擎的零分配 USB/IP 与 submit 路径**已同步**（第 7 节）；依赖驱动帧缓存或每连接 URB 归属的 2.1.0 时序修复未同步。
 
-2.0.0 的 **USB/IP 运行时**修复**已同步**（仅接受 host controller 导入、握手超时与并发上限、死服务清扫、按 location 拆除、释放与音频事件加固；见第 7 节同步清单），2.0.x 的零分配帧、输出、control 与 submit 路径也已移植。GKMD 未采用的是 2.0 数据模型、identity / lease 系统，以及 2.0.1–2.0.3 的安装/卸载器。
+2.0.0 的 **USB/IP 运行时**修复**已同步**（仅接受 host controller 导入、握手超时与并发上限、死服务清扫、按 location 拆除、释放与音频事件加固；见第 7 节同步清单），2.0.x 与 2.1.0 的零分配帧、输出、control 与 submit 路径也已移植。GKMD 未采用的是 2.0 数据模型、identity / lease 系统、2.0.1–2.1.0 的安装/卸载与移除工作，以及其余 2.1.0 驱动侧与 USB/IP 时序修复。
 
 GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的静态注册表和 1.x 派生的控制器 API。
 
 ### 5. 构建 / 工程差异
 
-| 维度 | HIDMaestro 2.0.3 | GKMD |
+| 维度 | HIDMaestro 2.1.0 | GKMD |
 | --- | --- | --- |
 | 产物 | 类库 `HIDMaestro.Core.dll` | NativeAOT 共享库：`GKMD.dll`（Windows）/ `libGKMD.so`（Linux） |
 | TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows`（Windows）与 `net10.0`（Linux），由同一个工程构建 |
@@ -135,18 +137,18 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 目录结构 | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | 扁平化到根目录 + `Usbip/` 子目录 |
 | 驱动资源 | 嵌入 UMDF2 驱动 + XUSB companion + SWD helper + INF + 签名/编目工具 + OpenVR 驱动 + `usbip2_ude` 文件，x64 与 ARM64 各一套 | **不嵌入任何内核 / UMDF2 驱动及签名/编目工具**；每个构建只嵌入 `Resources/USBip-0.9.8.1-x64.exe` 或 `Resources/USBip-0.9.8.1-arm64.exe` 中的一份，外加 `THIRD-PARTY-NOTICES.txt` |
 | usbip-win2 获取 | 构建时由 `prepare_usbip.ps1` 解包固定版本的 0.9.8.1 安装器，生成各架构 host controller 文件 | 直接嵌入 0.9.8.1，无下载目标；运行时校验 SHA-256 |
-| Profile 来源 | `profiles/` 下 348 个 JSON 文件；2.0.3 目录暴露 337 个内建 profile，以 source-generated JSON 编译进程序集 | 无 JSON 资源，由 `StaticProfileRegistry.cs` 代码构造 |
+| Profile 来源 | `profiles/` 下 348 个 JSON 文件；2.1.0 目录暴露 337 个内建 profile，以 source-generated JSON 编译进程序集 | 无 JSON 资源，由 `StaticProfileRegistry.cs` 代码构造 |
 | 资源逻辑名 | `HIDMaestro.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
-| 版本 | `2.0.3` | `4.9.0.0`（跟随 GKME） |
+| 版本 | `2.1.0` | `4.9.0.0`（跟随 GKME） |
 | AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `PublishAot=true`；每个发布产物都是 native，并通过 `gkmd_*` C ABI 导出；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制 |
 | ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 四个 NativeAOT 构建；Windows ARM64 构建只内嵌 ARM64 安装器，载荷按 OS 架构选择 |
 | 宿主集成 | 通用 SDK | GKME 把源码编译进自己的 AOT 镜像；zip 的使用者通过 `gkmd_*` C ABI 调用 |
 
 ### 6. 未从 1.5.1 基线继承的组件（附录）
 
-这些组件存在于 1.5.1 基线。上游 2.0.3 仍保留其中大部分（若干已扩展；`SwitchProPacker` 已被 profile state block 取代）；GKMD 均不包含。
+这些组件存在于 1.5.1 基线。上游 2.1.0 仍保留其中大部分（若干已扩展；`SwitchProPacker` 已被 profile state block 取代）；GKMD 均不包含。
 
 | 文件 / 功能（上游存在） | 原有职责 |
 | --- | --- |
@@ -173,7 +175,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 
 ### 7. 相对 1.5.1 基线的文件级改动（附录）
 
-以下是 GKMD 对 1.5.1 文件所做的改动。上游 2.0.3 此后已重写其中许多文件，因此本表记录的是 GKMD 的派生过程，而非 2.0.3 的当前实现。
+以下是 GKMD 对 1.5.1 文件所做的改动。上游 2.1.0 此后已重写其中许多文件，因此本表记录的是 GKMD 的派生过程，而非 2.1.0 的当前实现。
 
 | 文件 | 主要变更 |
 | --- | --- |
@@ -222,15 +224,17 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 - **GET_REPORT(Input)**：HID 描述符未声明的 report ID 返回 STALL，而不是最后一份报文。
 - **USB/IP 传输零分配**：命令 reader 自带接收缓冲，并复用 OUT 数据、等时描述符与包数组；输入泵在自己的缓冲里构建每一帧，队列中的帧在被读取应答或淘汰后归还缓冲池；Switch 与 GIP 帧就地构建；control 应答（描述符、状态、配置、接口、UAC 值、`GET_REPORT` 与 Sony feature stub）从设备自有缓冲或栈上发出，vendor 表的十六进制应答在构造时解码一次；audio URB 池化，包与 PCM 数组复用。
 - **submit 路径零分配**：`WriteInputFrame` 通过 section 指针写入、接受 span，seqlock 只用一个 write barrier 加一次 release store，`SetEvent` 门铃移出内联；`SubmitRawReport` 对没有固定字节的帧直接从调用方 span 写入；`SubmitState` 只在扩展 codec 与 XUSB GIP 块真正使用时才解析六个 simple slot，描述符路径由 `BuildReportInto` 自己读取轴值；`HidReportBuilder.WriteBits` 用一次掩码读改写写入任意 1–32 位字段，而不是逐位循环。
+- **输出按序投递（2.1.0）**：输出 ring 的 slot 在重填前先清零序号并加 barrier，落后 64 个包的读者不会把两个包混在一起通过两次校验。
 
 另有一项 GKMD 自身的调整：server 监听自己的 `37286..37301`，避开 HIDMaestro 的 `18509..18524` / `28509..28524` 与 FlexInput 的 `18008`，两者可并存而不会互相接管对方的 import。该段用完后回退到 OS 分配的 loopback 端口。
 
-以下 2.0.x 改动未同步（不适用或不属于 USB/IP 运行时）：owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略），以及 2.0 数据模型。上游的 ARM64 **驱动**载荷同样未同步，但 GKMD 在同一个程序集的独立 ARM64 构建中内嵌上游 ARM64 **安装器**，因此已支持 Windows on Arm。
+以下改动不适用或不属于 GKMD 的纯 USB/IP 运行时，因此未同步：owner record 与 transport index lease（身份/多程序系统）、直接安装 usbip-win2 host controller 与 `HMUninstall`（GKMD 保留官方安装器与仅探测策略）、2.0 数据模型，以及 2.1.0 的驱动侧工作（power policy、宿主与时钟优先级、移除重试、helper / `pnputil` 等待、xusb22 读者规则）。依赖驱动帧缓存或每连接 URB 归属的 2.1.0 USB/IP 时序修复同样未移植：手柄输入泵仍保留短队列并取最旧的一帧，而不是替换未被读取的那一帧；旧连接在释放设备之后才清空已挂起的读，新 import 可能在该窗口内 claim；unlink 仍只是移除已挂起的读并返回 `-ECONNRESET`，而不是丢弃已被取走的读的应答并在其后返回 0；audio URB 不携带其连接；attach 布局探测与 TCP 表大小未缓存。上游的 ARM64 **驱动**载荷同样未同步，但 GKMD 在同一个程序集的独立 ARM64 构建中内嵌上游 ARM64 **安装器**，因此已支持 Windows on Arm。
 
-#### 1.12.0 之后未同步的上游工作（1.12.0 → 2.0.3）
+#### 1.12.0 之后未同步的上游工作（1.12.0 → 2.1.0）
 
 - **2.0.0** 把设备层换成 JSON 数据 + 编译程序，新增带 JSON 路径的严格 profile 校验、`HMPort`、identity key / lease、NativeAOT、ARM64 载荷（GKMD 现已自行内嵌上游安装器，并按架构分别构建）、Wii U GameCube 适配器与 337 个 profile。这些是架构性改动，无法直接移植进 GKMD 的静态 C# 注册表；其中 USB/IP 运行时的修复已列在上方并已同步。
 - **2.0.1 – 2.0.3** 直接安装 usbip-win2 host controller 文件，新增 `HMUninstall` 与 usbip-win2 host controller / root-hub filter 移除，并修正 Valve persona。GKMD 有意保留官方 usbip-win2 安装器与仅探测的安装策略，也没有 Valve persona 需要修正。
+- **2.1.0** 重做驱动与 Xbox 360 companion 的帧投递，让 Xbox 360 驱动放弃 power policy 以在睡眠后存活，提高驱动宿主与时钟的优先级，加固移除 / 清理，并削减 SDK 与 USB/IP 传输中每帧的工作量。GKMD 没有 UMDF2 驱动、companion 与设备记录，因此这些部分无法移植；适用的 USB/IP 与 submit 路径已同步，未同步的部分列在上方。
 - 1.6.0 – 1.12.0 之间的 VR、Valve persona、Switch 2 Pro、键盘/鼠标 profile、PS Move、DualShock 3 压力等属于新 persona 或新 API，而非可移植修复；见第 4 节。
 
 ## 目录结构

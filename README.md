@@ -27,7 +27,7 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 
 - Upstream project: https://github.com/hifihedgehog/HIDMaestro
 - Origin version: `v1.5.1`
-- **Latest upstream compared: `v2.0.3`** (2026-10-22), the baseline for the API and behavior comparison. It has moved device behavior into JSON profiles with compiled programs, and ships identity keys, automatic transport installation, uninstall, VR and ARM64 payloads; it also changed the public API, so 1.x programs must migrate to 2.0. The allocation-free submit-path lane from 2.1.0 is synced separately.
+- **Latest upstream compared: `v2.1.0`** (2026-10-27), the baseline for the API and behavior comparison. It moved device behavior into JSON profiles with compiled programs in 2.0, and ships identity keys, automatic transport installation, uninstall, VR and ARM64 payloads; 2.1.0 reworks frame delivery (each frame once, in order, under load), makes the Xbox 360 family survive a system sleep, raises the driver-host and device-clock priorities, returns profile objects as snapshots, and cuts the work done per frame in the SDK, the driver and the USB/IP transport. The public API changed in 2.0, so 1.x programs must migrate to 2.0.
 - Upstream license: MIT License (see `LICENSE`; GKMD retains the original copyright notice)
 - Namespaces: `HIDMaestro` / `HIDMaestro.Internal` / `HIDMaestro.Internal.Usbip`
   → `GKMD` / `GKMD.Internal` / `GKMD.Internal.Usbip`
@@ -36,16 +36,16 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 - Runtime identifiers: `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*`
   → `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*`
 
-> Note: GKMD is the standalone product of a driver branch that evolved over the long term within the GKME project. It is **not** a line-by-line simplified single-file copy of HIDMaestro 1.5.1. This README compares GKMD against the **latest upstream, v2.0.3**, unless a row explicitly says "1.5.1 base". Because GKMD stays on the 1.5.1-derived API, it lacks the upstream work from 1.6.0 through 2.0.3 that builds on the 2.0 data model; its USB/IP runtime fixes have been synced through 2.0.3.
+> Note: GKMD is the standalone product of a driver branch that evolved over the long term within the GKME project. It is **not** a line-by-line simplified single-file copy of HIDMaestro 1.5.1. This README compares GKMD against the **latest upstream, v2.1.0**, unless a row explicitly says "1.5.1 base". Because GKMD stays on the 1.5.1-derived API, it lacks the upstream work from 1.6.0 through 2.1.0 that builds on the 2.0 data model or the UMDF2 driver; its USB/IP runtime fixes and the 2.1.0 allocation-free lanes have been synced where they apply, and section 7 lists what has not.
 
-## Differences from HIDMaestro 2.0.3
+## Differences from HIDMaestro 2.1.0
 
 ### 1. Transport / driver architecture
 
-| Dimension | HIDMaestro 2.0.3 | GKMD |
+| Dimension | HIDMaestro 2.1.0 | GKMD |
 | --- | --- | --- |
 | Controller creation path | Branches on `RequiresUsbipBackend`: ordinary profiles use UMDF2 + PnP, composite personas use USB/IP | **No branching; everything goes through USB/IP** (`CreateController` / `CreateControllerAt` both call `CreateUsbipController`) |
-| Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP for ordinary profiles; usbip-win2's host controller for composite personas. No kernel-mode driver | Pure USB/IP: usbip-win2 virtual host controller + vHCI on Windows, mainline's in-kernel `vhci_hcd` on Linux; **no UMDF2 driver, no INF, no PnP device node** |
+| Driver model | UMDF2 user-mode driver `HIDMaestro.dll` + XUSB companion + INF / PnP for ordinary profiles; usbip-win2's host controller for composite personas. No kernel-mode driver. The 2.1.0 driver gives up power policy before the device is created, so the ten Xbox 360 profiles survive a system sleep | Pure USB/IP: usbip-win2 virtual host controller + vHCI on Windows, mainline's in-kernel `vhci_hcd` on Linux; **no UMDF2 driver, no INF, no PnP device node** |
 | Device node | UMDF2 path registers a root-enumerated / SWD PnP devnode and writes friendly name / ControllerIndex; composite path is a vhci USB device | No PnP devnode; device strings come directly from USB descriptors |
 | Transport installation | Since 2.0.1 the SDK embeds the unmodified `usbip2_ude.inf` / `.sys` / `.cat` for x64 and ARM64 and registers the host controller devnode itself (`InstallHostController`); it never runs usbip-win2's installer and never installs its root-hub filter, and it records what it installed | `UsbipDriverInstaller` embeds the official (Inno) installer for the build's architecture — `USBip-0.9.8.1-x64.exe` in the x64 build, `USBip-0.9.8.1-arm64.exe` in the ARM64 build — and runs it when the OS architecture calls for it |
 | usbip-win2 version | 0.9.8.1, x64 + ARM64 payloads | 0.9.8.1 installer payload, one per build (x64 / ARM64); `VhciClient` speaks the **0.9.8.1 / 0.9.8.0 / 0.9.7.x** request layouts and probes the installed driver for the one it has |
@@ -53,13 +53,13 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | Installation policy | Silently installs the bundled transport on the first composite create; `InstallDriver()` does the same for UMDF2 | **Probe only**; throws `UsbipInstallRequiredException` / `UsbipRebootRequiredException` when missing/outdated, leaving installation to the host app |
 | Audio engine | Composite personas carry USB Audio over USB/IP; the SDK installs the transport for them | `UsbAudioEngine?`, created only when the profile declares a USB Audio streaming interface |
 | Controller index / identity release | Lease + reservation system, identity keys, multi-program coexistence (a keyless 1.12.0 program lands at transport index 64+) | Tears down the USB/IP device first, then releases the index (avoids port reuse races during fast switching) |
-| Uninstall | `HMUninstall` / `HIDMaestroUninstall.exe` removes controllers, driver packages, certificate, registry keys and files; 2.0.3 can also remove usbip-win2 and its root-hub filter | No uninstall API or tool; the host app handles teardown (`UsbipBackend.DetachAllOwned`) |
+| Uninstall | `HMUninstall` / `HIDMaestroUninstall.exe` removes controllers, driver packages, certificate, registry keys and files; 2.1.0 can also remove usbip-win2 and its root-hub filter, and deletes a device's records only after the device has left the tree | No uninstall API or tool; the host app handles teardown (`UsbipBackend.DetachAllOwned`) |
 | Architecture | One AnyCPU DLL carrying driver and transport payloads for x64 and ARM64 | Four NativeAOT builds: Windows x64 / ARM64 (each embedding only its own usbip-win2 installer) and Linux x64 / ARM64 (no installer payload) |
 | Diagnostic log | `DeviceOrchestrator.LogDiag` | Replaced with `Debug.WriteLine` |
 
 ### 2. Profiles and device behavior
 
-| Dimension | HIDMaestro 2.0.3 | GKMD |
+| Dimension | HIDMaestro 2.1.0 | GKMD |
 | --- | --- | --- |
 | Profile source | 337 built-in profiles (103 keyboards and mice) linked from `profiles/**/*.json`; custom and extracted profiles load at runtime; strict source-generated JSON | 10 personas constructed in code by `StaticProfileRegistry.cs`; **no JSON catalog, no profile extraction** |
 | Profile validation | Strict schema; a refused file is reported in `HMContext.ProfileLoadIssues` with its JSON path; code-built profiles throw `HMProfileException` with `ProfileId` / `JsonPath` | C# compile-time construction; no schema or JSON-path diagnostics |
@@ -88,22 +88,23 @@ GKMD **is modified from [hifihedgehog/HIDMaestro](https://github.com/hifihedgeho
 | NativeAOT / C ABI | `GKMD.csproj`, `Native/GKMDNative.cs`, `Native/gkmd.h` | `PublishAot=true`; every artifact is a native shared library exporting `gkmd_*`; only the reflection-based layout JSON path is locally suppressed |
 | GKME integration | `GKME.csproj` | GKME compiles the GKMD sources into its own AOT image; the released artifact is a native C ABI library |
 
-### 4. Upstream work GKMD has not adopted (1.6.0 → 2.0.3)
+### 4. Upstream work GKMD has not adopted (1.6.0 → 2.1.0)
 
-Only fixes that apply to the pure USB/IP design and that existed through 1.12.0 were synced. The following upstream work is not present:
+Only fixes that apply to the pure USB/IP design were synced. The following upstream work is not present:
 
 - **1.6.0 – 1.7.3**: virtual VR controllers and the OpenVR driver, Valve personas (Steam Controller, Steam Deck), the Steam Controller 2 raw report, WGI gamepad presentation for the Xbox 360 family, legacy `GetControllerState`, native binary stamping.
 - **1.8.0 – 1.12.0**: the identity / audio / DualShock 4 fixes (the USB/IP-relevant ones **are** synced; see below), the Switch 2 Pro with motion (1.11.0), 103 keyboard/mouse profiles and the keyboard/mouse API (1.12.0), and other catalog and persona work.
 - **2.0.0**: devices-as-data report fields, feature answers, protocols and report programs; the `ProgramForm` compiler / interpreter; `deviceModelFrom` models; strict profile validation with JSON paths; `HMPort`; identity keys and leases; `HMBuildInfo`; NativeAOT support; ARM64 driver/transport payloads; the Wii U GameCube adapter; the PS Move and DualShock 3 data forms; the 337-profile catalog.
 - **2.0.1 – 2.0.3**: direct installation of usbip-win2's host controller files without running its installer, `HMUninstall` / `HIDMaestroUninstall.exe`, removal of the usbip-win2 host controller and root-hub filter, and the Valve persona corrections.
+- **2.1.0**: the new driver build (power policy released so the Xbox 360 family survives sleep), `UmdfHostPriority = PriorityHigh` for every driver host and highest-priority device clocks, the removal and cleanup rule that asks the device first and retries a refusal in the background, the longer `hmswd.exe` and `pnputil` waits, the xusb22-style rule for the Xbox 360 companion's readers, profile objects returned as snapshots, and the VR submit / haptic-slot locking. The zero-allocation USB/IP and submit-path work that applies to a pure USB/IP engine **is** synced (section 7); the 2.1.0 timing fixes that depend on the driver's frame cache or per-connection URB ownership are not.
 
-The **USB/IP runtime** fixes from 2.0.0 *are* synced (host-controller-only imports, handshake limits, dead-server sweeps, location-based detach, disposal and audio-event hardening; see the sync list in section 7), together with the 2.0.x zero-allocation frame, output, control and submit paths. What GKMD does not carry is the 2.0 data model, the identity/lease system, and the 2.0.1–2.0.3 installer/uninstaller.
+The **USB/IP runtime** fixes from 2.0.0 *are* synced (host-controller-only imports, handshake limits, dead-server sweeps, location-based detach, disposal and audio-event hardening; see the sync list in section 7), together with the 2.0.x and 2.1.0 zero-allocation frame, output, control and submit paths. What GKMD does not carry is the 2.0 data model, the identity/lease system, the 2.0.1–2.1.0 installer/uninstaller and removal work, and the remaining 2.1.0 driver-side and USB/IP timing fixes.
 
 GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the code-defined static registry and the 1.x-derived controller API.
 
 ### 5. Build / project differences
 
-| Dimension | HIDMaestro 2.0.3 | GKMD |
+| Dimension | HIDMaestro 2.1.0 | GKMD |
 | --- | --- | --- |
 | Output | Class library `HIDMaestro.Core.dll` | NativeAOT shared library: `GKMD.dll` (Windows) / `libGKMD.so` (Linux) |
 | TargetFramework | `net10.0-windows10.0.26100.0` | `net10.0-windows` (Windows) and `net10.0` (Linux), built from one project |
@@ -112,18 +113,18 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Directory structure | `sdk/HIDMaestro.Core/` + `Internal/` + `Internal/Usbip/` + `ProgramForm/` + `Internal/Uninstall/` | Flattened to the root + the `Usbip/` subdirectory |
 | Driver resources | Embeds UMDF2 driver + XUSB companion + SWD helper + INFs + signing/catalog tools + OpenVR driver + `usbip2_ude` files, for x64 and ARM64 | **Embeds no kernel or UMDF2 driver and no signing/catalog tools**; each build embeds one of `Resources/USBip-0.9.8.1-x64.exe` / `Resources/USBip-0.9.8.1-arm64.exe` plus `THIRD-PARTY-NOTICES.txt` |
 | usbip-win2 acquisition | Build-time `prepare_usbip.ps1` unpacks the pinned 0.9.8.1 installers into per-architecture host-controller files | Embeds 0.9.8.1 directly, no download target; SHA-256 verified at runtime |
-| Profile source | 348 JSON files under `profiles/`; the 2.0.3 catalog exposes 337 built-in profiles, compiled into the assembly with source-generated JSON | No JSON resources, constructed in code by `StaticProfileRegistry.cs` |
+| Profile source | 348 JSON files under `profiles/`; the 2.1.0 catalog exposes 337 built-in profiles, compiled into the assembly with source-generated JSON | No JSON resources, constructed in code by `StaticProfileRegistry.cs` |
 | Resource logical names | `HIDMaestro.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
-| Version | `2.0.3` | `4.9.0.0` (follows GKME) |
+| Version | `2.1.0` | `4.9.0.0` (follows GKME) |
 | AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `PublishAot=true`; every released artifact is native and exported through the `gkmd_*` C ABI; reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally |
 | ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Four NativeAOT builds; the Windows ARM64 build embeds only the ARM64 installer, and the payload is selected by OS architecture |
 | Host integration | Generic SDK | GKME compiles the sources into its own AOT image; consumers of the zip use the `gkmd_*` C ABI |
 
 ### 6. Removed from the 1.5.1 base (appendix)
 
-These components exist in the 1.5.1 base. Upstream 2.0.3 still carries most of them (several have grown since; `SwitchProPacker` has been replaced by profile state blocks); GKMD carries none of them.
+These components exist in the 1.5.1 base. Upstream 2.1.0 still carries most of them (several have grown since; `SwitchProPacker` has been replaced by profile state blocks); GKMD carries none of them.
 
 | File / feature (present upstream) | Original responsibility |
 | --- | --- |
@@ -150,7 +151,7 @@ These components exist in the 1.5.1 base. Upstream 2.0.3 still carries most of t
 
 ### 7. File-level changes relative to the 1.5.1 base (appendix)
 
-These are the changes GKMD made to the 1.5.1 files. Upstream 2.0.3 has since rewritten many of them, so this table documents GKMD's derivation, not the current 2.0.3 implementation.
+These are the changes GKMD made to the 1.5.1 files. Upstream 2.1.0 has since rewritten many of them, so this table documents GKMD's derivation, not the current 2.1.0 implementation.
 
 | File | Main changes |
 | --- | --- |
@@ -199,15 +200,17 @@ These are the 2.0.x and 2.1.0 changes that live entirely in the USB/IP transport
 - **GET_REPORT(Input)**: a report ID the HID descriptor does not declare is answered with a STALL instead of the last report.
 - **Allocation-free USB/IP transfers**: the command reader owns its receive buffer and reuses the arrays for a submit's OUT data, isochronous descriptors and packets; the input pump builds each frame in its own buffer and hands queued frames back to a pool once a read answers them or the queue drops them; Switch and GIP frames are built in place; control replies (descriptors, status, configuration, interface, UAC values, GET_REPORT and the Sony feature stubs) are sent from a device-owned buffer or the stack, with the vendor table's hex answers decoded once at construction; and audio URBs are pooled with their packet and PCM arrays reused.
 - **Allocation-free submit path**: `WriteInputFrame` stores through the section's pointer, takes spans, orders the seqlock with one write barrier plus a release store, and keeps the `SetEvent` doorbells out of line; `SubmitRawReport` writes a frame with no fixed bytes straight from the caller's span; `SubmitState` resolves the six simple slots only for the extended codec and the XUSB GIP block, leaving the descriptor path to read the axes itself; and `HidReportBuilder.WriteBits` writes any 1–32-bit field with one masked read-modify-write instead of one pass per bit.
+- **In-order output delivery (2.1.0)**: an output ring slot's sequence number is zeroed behind a barrier before the slot is refilled, so a reader 64 packets behind cannot pass both checks on fields mixed from two packets.
 
 One GKMD-specific change accompanies these: the server listens on its own `37286..37301`, clear of HIDMaestro's `18509..18524` / `28509..28524` and FlexInput's `18008`, so the two can run side by side without either taking the other's imports. If the range is full, it falls back to an OS-assigned loopback port.
 
-Not synced from 2.0.x because they do not apply or are outside the USB/IP runtime: owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), and the 2.0 data model. Upstream's ARM64 *driver* payloads stay unsynced for the same reason, but GKMD ships the upstream ARM64 *installer* in a separate ARM64 build of the same assembly, so Windows on Arm is supported.
+Not synced because they do not apply or are outside GKMD's pure USB/IP runtime: owner records and transport-index leases (identity/coexistence system), direct installation of usbip-win2's host controller and `HMUninstall` (GKMD keeps the official installer and the probe-only policy), the 2.0 data model, and the 2.1.0 driver-side work (power policy, host and clock priorities, removal retries, helper/`pnputil` waits, the xusb22 reader rule). The 2.1.0 USB/IP timing fixes that depend on the driver's frame cache or per-connection URB ownership are also not ported: a gamepad's pump still keeps a short queue and serves the oldest frame instead of replacing the frame no read took; an old connection clears its reads only after releasing the device, so a new import can claim in that window; an unlink still removes a parked read and answers `-ECONNRESET` rather than dropping an already-taken read's answer and returning status 0 after it; audio URBs do not carry their connection; and the attach layout probe and the TCP-table size are not cached. Upstream's ARM64 *driver* payloads stay unsynced for the same reason, but GKMD ships the upstream ARM64 *installer* in a separate ARM64 build of the same assembly, so Windows on Arm is supported.
 
-#### Upstream work after 1.12.0 not synced (1.12.0 → 2.0.3)
+#### Upstream work after 1.12.0 not synced (1.12.0 → 2.1.0)
 
 - **2.0.0** replaces the device layer with JSON data and compiled programs, adds strict profile validation with JSON paths, `HMPort`, identity keys/leases, NativeAOT, ARM64 payloads (GKMD now ships the upstream installers itself, in per-architecture builds), the Wii U GameCube adapter and 337 profiles. These are architectural changes, not fixes that can be ported into GKMD's static C# registry. Its USB/IP runtime fixes are listed above and are synced.
 - **2.0.1 – 2.0.3** install usbip-win2's host controller files directly, add `HMUninstall` and removal of usbip-win2's host controller and root-hub filter, and correct the Valve personas. GKMD deliberately keeps the official usbip-win2 installer and the probe-only install policy, and has no Valve personas to correct.
+- **2.1.0** reworks frame delivery in the driver and the Xbox 360 companion, ends the Xbox 360 driver's power policy so the family survives sleep, raises the driver-host and clock priorities, hardens removal and cleanup, and trims per-frame work in the SDK and the USB/IP transport. GKMD has no UMDF2 driver, companion or device records, so those parts do not port; the applicable USB/IP and submit-path work is synced, and the parts that are not are listed above.
 - 1.6.0 – 1.12.0 features such as VR, Valve personas, Switch 2 Pro, keyboard/mouse profiles, PS Move and DualShock 3 pressure are new personas or APIs rather than fixes; see section 4.
 
 ## Directory structure
