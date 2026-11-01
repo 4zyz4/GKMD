@@ -12,7 +12,7 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <LangVersion>latest</LangVersion>
 
-    <Version>4.8.0.0</Version>
+    <Version>4.9.0.0</Version>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <Description>GKMD virtual USB game controller engine (USB/IP backend), derived from hifihedgehog/HIDMaestro 1.5.1.</Description>
@@ -26,28 +26,60 @@
     <DebugType>full</DebugType>
   </PropertyGroup>
 
-  <ItemGroup>
+  <!-- One DLL per architecture: every build embeds exactly one usbip-win2
+       installer, so a host ships only the payload its machines can load.
+       The choice follows the RuntimeIdentifier when one is given
+       (`dotnet build -r win-arm64`, `dotnet publish -r win-arm64` from a
+       host), and can be set directly with -p:UsbipPayloadArch=arm64 by a
+       host that sets its RID in its own project file instead of on the
+       command line. Without either, the build is the x64 one. -->
+  <PropertyGroup>
+    <UsbipPayloadArch Condition="'$(UsbipPayloadArch)' == '' and '$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.ToLowerInvariant().Contains('arm64'))">arm64</UsbipPayloadArch>
+    <UsbipPayloadArch Condition="'$(UsbipPayloadArch)' == ''">x64</UsbipPayloadArch>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(UsbipPayloadArch)' == 'arm64'">
+    <EmbeddedResource Include="Resources\USBip-0.9.8.1-arm64.exe">
+      <LogicalName>GKMD.Resources.USBip-0.9.8.1-arm64.exe</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UsbipPayloadArch)' != 'arm64'">
     <EmbeddedResource Include="Resources\USBip-0.9.8.1-x64.exe">
       <LogicalName>GKMD.Resources.USBip-0.9.8.1-x64.exe</LogicalName>
     </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Resources\THIRD-PARTY-NOTICES.txt">
       <LogicalName>GKMD.Resources.THIRD-PARTY-NOTICES.txt</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
+
+  <Target Name="ValidateUsbipPayloadArch" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(UsbipPayloadArch)' != 'x64' and '$(UsbipPayloadArch)' != 'arm64'"
+           Text="UsbipPayloadArch must be 'x64' or 'arm64' (got '$(UsbipPayloadArch)')." />
+  </Target>
 
   <ItemGroup>
     <None Include="LICENSE" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
     <None Include="Resources\THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <!-- Release packaging: dotnet build -c Release -t:PackageRelease
-       Produces bin\Release\GKMD-v<version>.zip containing GKMD.dll, LICENSE
-       and THIRD-PARTY-NOTICES.txt so the notices travel with every copy. -->
+  <!-- Release packaging: one zip per architecture, each built from its own
+       build so the DLL inside carries only that architecture's installer.
+
+         dotnet build -c Release -t:PackageRelease -r win-x64
+         dotnet build -c Release -t:PackageRelease -r win-arm64
+
+       Produces bin\Release\GKMD-v<version>-x64.zip and
+       ...-arm64.zip, each containing GKMD.dll, LICENSE and
+       THIRD-PARTY-NOTICES.txt so the notices travel with every copy. -->
   <Target Name="PackageRelease" DependsOnTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
-      <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)</ReleaseStageDir>
-      <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion).zip</ReleaseZipPath>
+      <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(UsbipPayloadArch)</ReleaseStageDir>
+      <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion)-$(UsbipPayloadArch).zip</ReleaseZipPath>
     </PropertyGroup>
     <RemoveDir Directories="$(ReleaseStageDir)" />
     <MakeDir Directories="$(ReleaseStageDir)" />

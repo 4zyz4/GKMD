@@ -19,7 +19,10 @@ namespace GKMD.Internal.Usbip;
 /// location that attach, stop and every row carry, which moves busid,
 /// service and host 4 bytes on. Each size and offset in
 /// <see cref="Layouts"/> was checked against that tag's own header for
-/// x64. The driver compares every request's size field with its own
+/// x64. The same sizes hold on ARM64: these structs carry fixed-size
+/// character arrays and plain integers, never a pointer-sized field, so
+/// the ARM64 driver of a release speaks the same layout as its x64 build.
+/// The driver compares every request's size field with its own
 /// <c>sizeof</c> and refuses a mismatch before acting on it
 /// (vhci_ioctl.cpp in all three tags), so a probe with the wrong size is
 /// harmless — which is exactly how the layout is discovered.</para>

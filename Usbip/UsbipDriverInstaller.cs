@@ -17,11 +17,19 @@ namespace GKMD.Internal.Usbip;
 /// a composite profile and it works. There is no separate download, no
 /// second package, and nothing for a user to go find.</para>
 ///
-/// <para>The embedded binary is the upstream release asset, unmodified,
-/// and its SHA256 is verified after extraction against the digest the
-/// upstream release publishes. A mismatch throws rather than running an
-/// unverified installer. The BSD-2-Clause notice ships beside it and is
-/// written next to the binary at deploy time.</para>
+/// <para>Each build of this assembly embeds exactly one architecture's
+/// upstream release asset, unmodified: the x64 build carries the x64
+/// installer and the ARM64 build the ARM64 one, so a host ships only the
+/// payload it can use. The payload is still chosen at run time from the OS
+/// architecture rather than the process architecture, so an x64 host
+/// process running under emulation on Windows on Arm installs the ARM64
+/// transport — ARM64 Windows loads only ARM64 kernel drivers. A build whose
+/// embedded payload does not match the machine reports that instead of
+/// running an installer that cannot work. The SHA256 is verified after
+/// extraction against the digest the upstream release publishes; a mismatch
+/// throws rather than running an unverified installer. The BSD-2-Clause
+/// notice ships beside it and is written next to the binary at deploy
+/// time.</para>
 ///
 /// <para>Install is silent, needs the same elevation
 /// <see cref="GKMD.GKContext.InstallDriver"/> already needs, and
@@ -33,15 +41,51 @@ namespace GKMD.Internal.Usbip;
 internal static class UsbipDriverInstaller
 {
     public const string Version = "0.9.8.1";
-    private const string InstallerFile = "USBip-" + Version + "-x64.exe";
     private const string NoticeFile = "THIRD-PARTY-NOTICES.txt";
 
-    /// <summary>SHA256 of the upstream release asset, as published by the
-    /// GitHub release API for v.0.9.8.1. This is the runtime check on the
-    /// extracted copy, the other half of the build-time verification the
-    /// SDK's resource packaging performs.</summary>
-    private const string InstallerSha256 =
-        "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a";
+    /// <summary>One architecture's upstream release asset: the name it is
+    /// embedded and extracted under, and the SHA256 the GitHub release API
+    /// publishes for it. That digest is the runtime check on the extracted
+    /// copy, so a tampered or truncated resource never reaches the
+    /// installer.</summary>
+    private sealed record InstallerPayload(string Architecture, string FileName, string Sha256)
+    {
+        public string LogicalName => "GKMD.Resources." + FileName;
+    }
+
+    /// <summary>SHA256 from the release API for v.0.9.8.1
+    /// (assets USBip-0.9.8.1-x64.exe / USBip-0.9.8.1-arm64.exe).</summary>
+    private static readonly InstallerPayload s_x64Payload = new(
+        "x64", "USBip-" + Version + "-x64.exe",
+        "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a");
+
+    private static readonly InstallerPayload s_arm64Payload = new(
+        "arm64", "USBip-" + Version + "-arm64.exe",
+        "cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800");
+
+    /// <summary>The payload this machine needs. Keyed on the OS architecture
+    /// rather than the process architecture: an x64 build of the host app
+    /// runs under emulation on Windows on Arm, but the kernel still loads
+    /// only ARM64 drivers, so the ARM64 installer is the one that works.
+    /// Every non-ARM64 host keeps using the x64 asset.</summary>
+    private static InstallerPayload Payload =>
+        RuntimeInformation.OSArchitecture == Architecture.Arm64 ? s_arm64Payload : s_x64Payload;
+
+    /// <summary>The architecture whose installer this build embedded ("x64"
+    /// or "arm64"), or null when neither is present. One build carries exactly
+    /// one payload, so a host can check this before offering to install and
+    /// avoid handing the user an installer for the wrong machine.</summary>
+    internal static string? BundledArchitecture
+    {
+        get
+        {
+            var asm = typeof(UsbipDriverInstaller).Assembly;
+            foreach (InstallerPayload payload in new[] { s_x64Payload, s_arm64Payload })
+                if (asm.GetManifestResourceInfo(payload.LogicalName) != null)
+                    return payload.Architecture;
+            return null;
+        }
+    }
 
     private static readonly object s_lock = new();
     private static bool s_verifiedThisProcess;
@@ -142,9 +186,10 @@ internal static class UsbipDriverInstaller
                 return UsbipInstallResult.Success;
             }
 
+            InstallerPayload payload = Payload;
             progress?.Invoke(interactive
-                ? "正在释放并启动 USBip 安装程序..."
-                : $"Installing USB transport (usbip-win2 {Version})...");
+                ? $"正在释放并启动 USBip 安装程序（{payload.Architecture}）..."
+                : $"Installing USB transport (usbip-win2 {Version}, {payload.Architecture})...");
 
             string exe = ExtractInstaller();
             InstallerOutcome outcome = RunInstaller(exe, interactive);
@@ -544,32 +589,44 @@ internal static class UsbipDriverInstaller
     [DllImport("cfgmgr32.dll")]
     private static extern int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
 
-    /// <summary>Extract the bundled installer and its license notice to a
-    /// per-version temp directory, verifying the binary's hash. Reuses an
-    /// already-extracted copy when the hash still matches.</summary>
+    /// <summary>Extract this architecture's bundled installer and the license
+    /// notice to a per-version, per-architecture temp directory, verifying
+    /// the binary's hash. Reuses an already-extracted copy when the hash
+    /// still matches.</summary>
     private static string ExtractInstaller()
     {
-        string dir = Path.Combine(Path.GetTempPath(), $"GKMD_usbip_{Version}");
+        InstallerPayload payload = Payload;
+        string dir = Path.Combine(Path.GetTempPath(),
+            $"GKMD_usbip_{Version}_{payload.Architecture}");
         Directory.CreateDirectory(dir);
-        string exePath = Path.Combine(dir, InstallerFile);
+        string exePath = Path.Combine(dir, payload.FileName);
 
-        if (File.Exists(exePath) && (s_verifiedThisProcess || HashMatches(exePath)))
+        if (File.Exists(exePath) && (s_verifiedThisProcess || HashMatches(exePath, payload)))
             return exePath;
 
         var asm = typeof(UsbipDriverInstaller).Assembly;
-        string logical = "GKMD.Resources." + InstallerFile;
-        using (var stream = asm.GetManifestResourceStream(logical))
+        using (var stream = asm.GetManifestResourceStream(payload.LogicalName))
         {
             if (stream == null)
+            {
+                string? bundled = BundledArchitecture;
+                if (bundled != null)
+                    throw new InvalidOperationException(
+                        $"This GKMD build embeds only the {bundled} usbip-win2 installer, but this " +
+                        $"machine needs the {payload.Architecture} one (OS architecture " +
+                        $"{RuntimeInformation.OSArchitecture}). Ship the {payload.Architecture} " +
+                        $"build (dotnet build -r win-{payload.Architecture}) or rebuild with " +
+                        $"-p:UsbipPayloadArch={payload.Architecture}.");
                 throw new InvalidOperationException(
-                    $"The bundled usbip-win2 installer ('{logical}') is missing from " +
-                    "GKMD.Core.dll. The PackResources MSBuild target fetches and embeds it; " +
-                    "rebuild the SDK.");
+                    $"The bundled usbip-win2 installer ('{payload.LogicalName}') is missing from " +
+                    "GKMD.Core.dll. Each architecture's payload is a fixed file under Resources\\ " +
+                    "embedded by GKMD.csproj; rebuild the SDK.");
+            }
             using var fs = File.Create(exePath);
             stream.CopyTo(fs);
         }
 
-        if (!HashMatches(exePath))
+        if (!HashMatches(exePath, payload))
         {
             try { File.Delete(exePath); } catch { }
             throw new InvalidOperationException(
@@ -595,13 +652,13 @@ internal static class UsbipDriverInstaller
         return exePath;
     }
 
-    private static bool HashMatches(string path)
+    private static bool HashMatches(string path, InstallerPayload payload)
     {
         try
         {
             using var fs = File.OpenRead(path);
             byte[] hash = SHA256.HashData(fs);
-            return Convert.ToHexString(hash).Equals(InstallerSha256, StringComparison.OrdinalIgnoreCase);
+            return Convert.ToHexString(hash).Equals(payload.Sha256, StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
     }
