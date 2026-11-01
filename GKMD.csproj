@@ -95,15 +95,16 @@
          dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
          dotnet build -c Release -f net10.0 -t:PackageRelease
 
-       Produces bin\Release\GKMD-v<version>-x64.zip, ...-arm64.zip and
-       ...-linux.zip, each containing GKMD.dll, LICENSE and
-       THIRD-PARTY-NOTICES.txt so the notices travel with every copy. -->
+       Produces bin\Release\GKMD-v<version>-windows-x64.zip,
+       ...-windows-arm64.zip and ...-linux.zip, each containing GKMD.dll,
+       LICENSE and THIRD-PARTY-NOTICES.txt so the notices travel with every
+       copy. -->
   <Target Name="PackageRelease" DependsOnTargets="Build"
           Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <ReleaseVersion>$([System.Version]::Parse('$(Version)').ToString(3))</ReleaseVersion>
       <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0'">linux</ReleaseSuffix>
-      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0-windows'">$(UsbipPayloadArch)</ReleaseSuffix>
+      <ReleaseSuffix Condition="'$(TargetFramework)' == 'net10.0-windows'">windows-$(UsbipPayloadArch)</ReleaseSuffix>
       <ReleaseStageDir>$(MSBuildProjectDirectory)\obj\release-package\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix)</ReleaseStageDir>
       <ReleaseZipPath>$(MSBuildProjectDirectory)\bin\Release\GKMD-v$(ReleaseVersion)-$(ReleaseSuffix).zip</ReleaseZipPath>
     </PropertyGroup>

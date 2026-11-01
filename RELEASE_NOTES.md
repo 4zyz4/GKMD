@@ -103,15 +103,15 @@ mainline's in-kernel `vhci_hcd` and needs no driver of GKMD's own.
 
 | File | Size | Notes |
 | --- | --- | --- |
-| `GKMD-v4.9.0-x64.zip` | 25,426,895 bytes | Windows x64: `GKMD.dll` (26,413,056 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-arm64.zip` | 18,355,088 bytes | Windows ARM64: `GKMD.dll` (19,389,952 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux.zip` | 131,647 bytes | Linux (`net10.0`): `GKMD.dll` (313,856 bytes, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-x64.zip` | 25,426,898 bytes | Windows x64: `GKMD.dll` (26,413,056 bytes, embeds `USBip-0.9.8.1-x64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-arm64.zip` | 18,355,046 bytes | Windows ARM64: `GKMD.dll` (19,389,952 bytes, embeds `USBip-0.9.8.1-arm64.exe`), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux.zip` | 131,648 bytes | Linux (`net10.0`): `GKMD.dll` (313,856 bytes, no installer payload), `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
 
 SHA-256:
 
-- `GKMD-v4.9.0-x64.zip`: `5CE1083FA111491248B554E4DF3D15B5EE157F3B5E87863E21F174BD31FED723`
-- `GKMD-v4.9.0-arm64.zip`: `23F11F4F0BA54B126AC8B36EFAD7AFB4124DA10E542498173126EFCAAE64EF49`
-- `GKMD-v4.9.0-linux.zip`: `C68E60DF012546087422F7E3B5A1C175698413A6128BB38B89167B09C3E02D50`
+- `GKMD-v4.9.0-windows-x64.zip`: `DAA07017C13CADC68B346057449626B3DA0790D40C684FA4D9CE9675F541640C`
+- `GKMD-v4.9.0-windows-arm64.zip`: `13B7CA46BCE1E9B214A99EBCDC6F9CF49457F93D7A10B95AD222661E52DA348F`
+- `GKMD-v4.9.0-linux.zip`: `E7E781028CD71C566631AEF9F9CD2C814D2EDC947B61E7933B2067FCE180092E`
 
 Produced by the three `PackageRelease` commands above; Native AOT compilation
 happens in the host application (GKME), not in this library.
@@ -230,15 +230,15 @@ GKMD 4.9.0 在同一个 AnyCPU 程序集上加入 Linux 支持与 Windows on Arm
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `GKMD-v4.9.0-x64.zip` | 25,426,895 字节 | Windows x64：`GKMD.dll`（26,413,056 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-arm64.zip` | 18,355,088 字节 | Windows ARM64：`GKMD.dll`（19,389,952 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
-| `GKMD-v4.9.0-linux.zip` | 131,647 字节 | Linux（`net10.0`）：`GKMD.dll`（313,856 字节，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-x64.zip` | 25,426,898 字节 | Windows x64：`GKMD.dll`（26,413,056 字节，内嵌 `USBip-0.9.8.1-x64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-windows-arm64.zip` | 18,355,046 字节 | Windows ARM64：`GKMD.dll`（19,389,952 字节，内嵌 `USBip-0.9.8.1-arm64.exe`）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.0-linux.zip` | 131,648 字节 | Linux（`net10.0`）：`GKMD.dll`（313,856 字节，无安装器载荷）、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
 
 SHA-256：
 
-- `GKMD-v4.9.0-x64.zip`：`5CE1083FA111491248B554E4DF3D15B5EE157F3B5E87863E21F174BD31FED723`
-- `GKMD-v4.9.0-arm64.zip`：`23F11F4F0BA54B126AC8B36EFAD7AFB4124DA10E542498173126EFCAAE64EF49`
-- `GKMD-v4.9.0-linux.zip`：`C68E60DF012546087422F7E3B5A1C175698413A6128BB38B89167B09C3E02D50`
+- `GKMD-v4.9.0-windows-x64.zip`：`DAA07017C13CADC68B346057449626B3DA0790D40C684FA4D9CE9675F541640C`
+- `GKMD-v4.9.0-windows-arm64.zip`：`13B7CA46BCE1E9B214A99EBCDC6F9CF49457F93D7A10B95AD222661E52DA348F`
+- `GKMD-v4.9.0-linux.zip`：`E7E781028CD71C566631AEF9F9CD2C814D2EDC947B61E7933B2067FCE180092E`
 
 分别由上文三条 `PackageRelease` 命令生成；Native AOT 编译在宿主应用（GKME）
 中完成，而非本类库。

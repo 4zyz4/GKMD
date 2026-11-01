@@ -337,7 +337,7 @@ GKME 已使用 `<PublishAot>true</PublishAot>` + `<PublishTrimmed>true</PublishT
 ## 发布（Releases）
 
 自 v4.9.0 起，每个 [GitHub Release](../../releases) 按产物各附带一个 zip ——
-`GKMD-v<版本>-x64.zip`、`GKMD-v<版本>-arm64.zip` 与
+`GKMD-v<版本>-windows-x64.zip`、`GKMD-v<版本>-windows-arm64.zip` 与
 `GKMD-v<版本>-linux.zip` —— 各自内含该构建的 `GKMD.dll`（Release、IL、
 AnyCPU）、`LICENSE` 与 `THIRD-PARTY-NOTICES.txt`，确保许可声明随每份二进制
 副本分发。两个 Windows 构建只内嵌各自架构的 usbip-win2 安装器；Linux 构建

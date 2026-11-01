@@ -306,9 +306,9 @@ GKME already publishes with `<PublishAot>true</PublishAot>` + `<PublishTrimmed>t
 ## Releases
 
 Starting with v4.9.0, each [GitHub Release](../../releases) attaches one zip per
-artifact — `GKMD-v<version>-x64.zip`, `GKMD-v<version>-arm64.zip` and
-`GKMD-v<version>-linux.zip` — each holding that build's `GKMD.dll` (Release,
-IL, AnyCPU), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices travel
+artifact — `GKMD-v<version>-windows-x64.zip`,
+`GKMD-v<version>-windows-arm64.zip` and `GKMD-v<version>-linux.zip` — each
+holding that build's `GKMD.dll` (Release, IL, AnyCPU), `LICENSE` and `THIRD-PARTY-NOTICES.txt`, so the notices travel
 with every copy of the binary. The two Windows builds embed only their own
 architecture's usbip-win2 installer; the Linux build carries no installer
 payload (mainline's `vhci_hcd` is used instead). Build all three with:
