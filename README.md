@@ -370,4 +370,9 @@ single RID-neutral zip. The release changelog lives in
 
 ## License
 
-MIT License, see [LICENSE](LICENSE). The original copyright belongs to the HIDMaestro Contributors; GKMD retains that notice and marks its derivation. The bundled usbip-win2 (BSD-2-Clause) license is in [Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt).
+MIT License, see [LICENSE](LICENSE).
+
+Copyright (c) 2026 GKMD Contributors
+Copyright (c) 2026 HIDMaestro Contributors
+
+GKMD is a modified work derived from [HIDMaestro](https://github.com/hifihedgehog/HIDMaestro) v1.5.1, which is distributed under the MIT License. The original copyright belongs to the HIDMaestro Contributors; GKMD retains that notice and marks its derivation. The bundled usbip-win2 (BSD-2-Clause) license is in [Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt).

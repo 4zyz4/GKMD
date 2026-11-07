@@ -384,6 +384,12 @@ layout 读写）在代码里用 `#pragma warning disable IL2026, IL3050` 就地�
 
 ## 许可
 
-MIT License，见 [LICENSE](LICENSE)。原始版权归 HIDMaestro Contributors，
-GKMD 保留该声明并标注其派生关系。捆绑的 usbip-win2（BSD-2-Clause）许可见
+MIT License，见 [LICENSE](LICENSE)。
+
+Copyright (c) 2026 GKMD Contributors
+Copyright (c) 2026 HIDMaestro Contributors
+
+GKMD 是 [HIDMaestro](https://github.com/hifihedgehog/HIDMaestro) v1.5.1 的修改派生作品，
+上游以 MIT License 发布。原始版权归 HIDMaestro Contributors，GKMD 保留该声明并标注其派生关系。
+捆绑的 usbip-win2（BSD-2-Clause）许可见
 [Resources/THIRD-PARTY-NOTICES.txt](Resources/THIRD-PARTY-NOTICES.txt)。
