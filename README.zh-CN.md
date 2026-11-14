@@ -141,7 +141,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 资源逻辑名 | `HIDMaestro.*` | `GKMD.Resources.*` |
 | 运行时标识 | `Global\HIDMaestro*`、`HIDMAESTRO_TIMEOUT_SCALE`、`HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`、`GKMD_TIMEOUT_SCALE`、`HKLM\SOFTWARE\GKMD*` |
 | 双阶段构建 | 需要（先为 x64/ARM64 构建 UMDF2 驱动、companion、SWD helper 与 OpenVR 驱动，再构建 SDK） | 不需要，资源为固定文件 |
-| 版本 | `2.1.0` | `4.9.0.0`（跟随 GKME） |
+| 版本 | `2.1.0` | `4.9.1.0`（跟随 GKME） |
 | AOT / trimming | `IsAotCompatible=true`；source-generated JSON、`LibraryImport`，AOT 分析器把警告当构建失败；可直接 NativeAOT 发布 | `PublishAot=true`；每个发布产物都是 native，并通过 `gkmd_*` C ABI 导出；`GKLayoutLoader.cs` 中基于反射的 `System.Text.Json` 局部抑制 |
 | ARM64 | 单个 DLL 内含 x64 与 ARM64 驱动/传输载荷 | 四个 NativeAOT 构建；Windows ARM64 构建只内嵌 ARM64 安装器，载荷按 OS 架构选择 |
 | 宿主集成 | 通用 SDK | GKME 把源码编译进自己的 AOT 镜像；zip 的使用者通过 `gkmd_*` C ABI 调用 |
@@ -180,7 +180,7 @@ GKMD 仍然保留官方 usbip-win2 安装器、仅探测策略、代码定义的
 | 文件 | 主要变更 |
 | --- | --- |
 | `GKContext.cs` | 删除构造函数后台预热；`IsDriverInstalled` → `UsbipBackend.IsAvailable`；`InstallUsbipBackend` 改为 `Install(interactive:false)` 并失败抛异常；`InstallDriver` → `EnsureInstalled()`（不再自动安装）；`RemoveAllVirtualControllers` → `UsbipBackend.DetachAllOwned`；`LoadDefaultProfiles` 改用 `StaticProfileRegistry`；删除 `LoadProfilesFromDirectory`；`CreateController/CreateControllerAt` 一律走 USB/IP 且允许仅有 USB 配置（无 HID 描述符）；`FinalizeNames` 变为 no-op |
-| `GKController.cs` | `_reportBuilder` 可空、新增 `_rawReportBuffer`；`SubmitState` 对无 HID 的厂商 profile 直接返回；删除全部 PID 发布 API；删除 Switch Pro 控制器侧逻辑（移至设备端）；`UsbAudio` 仅在有音频流接口时创建 |
+| `GKController.cs` | `_reportBuilder` 可空、新增 `_rawReportBuffer`；`SubmitState` 对无 HID 的厂商 profile 直接返回，Switch persona 例外，会打包 48 字节 Nintendo body（`_switchBodyBuffer`）；删除全部 PID 发布 API；Switch 报文整形位于设备模拟器；`UsbAudio` 仅在有音频流接口时创建 |
 | `ControllerProfile.cs` | 新增 `SerialNumberString`；删除 `Backend` / `RequiresUsbipBackend`；`UsbConfiguration` 变为每个 profile 都携带的描述符集；`GetOrBuildReportBuilder()` 可返回 null；**删除整个 `ProfileDatabase` 类**；`FieldSpec` 新增 `Divisor` / `FullValue`，用于同步自 1.10.0 的 DualShock 4 修复 |
 | `SharedMemoryIO.cs` | **删除 PID 状态整套**：PID_STATE 尺寸/偏移常量、`EnsurePidStateMapping`、`WritePidPool/BlockLoad/State`、`ReadPidBlockLoad`、`WritePidReportIds` 及相关句柄与释放逻辑 |
 | `UsbConfigurationSpec.cs` | 新增 `InputReportSize`、`VendorRequests`（含 `VendorControlRequest` 类型）、`Gip`、`ResolutionMultiplier`；注释改为 USB/IP persona 描述符集 |

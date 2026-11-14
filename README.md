@@ -117,7 +117,7 @@ GKMD instead keeps the official usbip-win2 installer, the probe-only policy, the
 | Resource logical names | `HIDMaestro.*` | `GKMD.Resources.*` |
 | Runtime identifiers | `Global\HIDMaestro*`, `HIDMAESTRO_TIMEOUT_SCALE`, `HKLM\SOFTWARE\HIDMaestro*` | `Global\GKMD*`, `GKMD_TIMEOUT_SCALE`, `HKLM\SOFTWARE\GKMD*` |
 | Two-phase build | Required (build the native UMDF2 driver, companion, SWD helper and OpenVR driver for x64/ARM64 first, then the SDK) | Not required; resources are fixed files |
-| Version | `2.1.0` | `4.9.0.0` (follows GKME) |
+| Version | `2.1.0` | `4.9.1.0` (follows GKME) |
 | AOT / trimming | `IsAotCompatible=true`; source-generated JSON, `LibraryImport`, AOT analyzers fail the build on warnings; ships NativeAOT-ready | `PublishAot=true`; every released artifact is native and exported through the `gkmd_*` C ABI; reflection-based `System.Text.Json` in `GKLayoutLoader.cs` is suppressed locally |
 | ARM64 | Driver and usbip payloads for x64 and ARM64 in one DLL | Four NativeAOT builds; the Windows ARM64 build embeds only the ARM64 installer, and the payload is selected by OS architecture |
 | Host integration | Generic SDK | GKME compiles the sources into its own AOT image; consumers of the zip use the `gkmd_*` C ABI |
@@ -156,7 +156,7 @@ These are the changes GKMD made to the 1.5.1 files. Upstream 2.1.0 has since rew
 | File | Main changes |
 | --- | --- |
 | `GKContext.cs` | Removes background warm-up from the constructor; `IsDriverInstalled` → `UsbipBackend.IsAvailable`; `InstallUsbipBackend` changed to `Install(interactive:false)` and throws on failure; `InstallDriver` → `EnsureInstalled()` (no longer auto-installs); `RemoveAllVirtualControllers` → `UsbipBackend.DetachAllOwned`; `LoadDefaultProfiles` now uses `StaticProfileRegistry`; removes `LoadProfilesFromDirectory`; `CreateController/CreateControllerAt` always go through USB/IP and allow a USB-only configuration (no HID descriptor); `FinalizeNames` becomes a no-op |
-| `GKController.cs` | `_reportBuilder` is nullable, adds `_rawReportBuffer`; `SubmitState` returns immediately for vendor profiles without HID; removes all PID publishing APIs; removes Switch Pro controller-side logic (moved to the device side); `UsbAudio` is created only when there is an audio streaming interface |
+| `GKController.cs` | `_reportBuilder` is nullable, adds `_rawReportBuffer`; `SubmitState` returns immediately for vendor profiles without HID, except Switch personas, which pack the 48-byte Nintendo body (`_switchBodyBuffer`); removes all PID publishing APIs; Switch report shaping lives in the device emulator; `UsbAudio` is created only when there is an audio streaming interface |
 | `ControllerProfile.cs` | Adds `SerialNumberString`; removes `Backend` / `RequiresUsbipBackend`; `UsbConfiguration` becomes the descriptor set carried by every profile; `GetOrBuildReportBuilder()` can return null; **removes the entire `ProfileDatabase` class**; `FieldSpec` gains `Divisor` / `FullValue` for the DualShock 4 fixes synced from 1.10.0 |
 | `SharedMemoryIO.cs` | **Removes the whole PID state**: PID_STATE size/offset constants, `EnsurePidStateMapping`, `WritePidPool/BlockLoad/State`, `ReadPidBlockLoad`, `WritePidReportIds` and related handles and disposal logic |
 | `UsbConfigurationSpec.cs` | Adds `InputReportSize`, `VendorRequests` (including the `VendorControlRequest` type), `Gip`, `ResolutionMultiplier`; comments changed to describe a USB/IP persona descriptor set |

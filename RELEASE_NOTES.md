@@ -1,5 +1,151 @@
 # Release notes
 
+## v4.9.1 — 2026-11-14 — Switch report fixes for DirectInput and eden
+
+**English** | [简体中文](#v491--2026-11-14--switch-手柄在-directinput-与-eden-下的报文修复)
+
+GKMD 4.9.1 is a bug-fix release for the Switch Pro / Joy-Con personas. It
+replaces the single report shape with per-consumer reports and fixes the axis
+range, so Windows HIDClass/DirectInput and eden (SDL HIDAPI plus its own
+joycon driver) both decode the pad correctly. No managed API or C ABI
+function changed.
+
+### Highlights
+
+- **`0x3F` is the only standard HID gamepad** — the USB HID report descriptor
+  now declares report `0x3F` as a 12-byte standard gamepad (16 buttons, a
+  4-bit hat, X/Y/Rx/Ry) and makes `0x30` / `0x21` / `0x81` opaque 63-byte
+  vendor inputs. DirectInput therefore sees a real pad before any protocol
+  host connects and can no longer read the full-mode timer/battery bytes as
+  buttons. The outputs `0x01` / `0x10` / `0x80` / `0x82` stay opaque.
+- **4-byte Logical Maximum** — the axes now use the long form
+  `0x27 FF FF 00 00`. A 2-byte `0x26 FF FF` is sign-extended to `-1` by the
+  HID parser, which left DirectInput's axis range invalid and reported 0 for
+  X/Y/Rx/Ry even though the buttons and hat worked.
+- **One frame shape at a time** — subcommand `0x03` selects the input mode:
+  `0x30` / `0x31` stream the 64-byte Nintendo full report, `0x3F` (the
+  default) streams the 12-byte simple frame. Frames of the previous shape are
+  dropped when the mode flips, so eden never parses a full-mode frame as its
+  "input-only" digital-stick packet and DirectInput never sees timer/battery
+  bytes in a simple frame. `GET_REPORT(Input)` serves the latest frame of the
+  requested shape.
+- **Switch `SubmitState` packs the 48-byte body** — a caller that only has
+  `GKGamepadState` now drives the same Nintendo body path as
+  `SubmitRawReport`: buttons, both 12-bit sticks and three IMU frames. Face
+  buttons follow SDL's positional wiring (X/left, Y/top, A/bottom, B/right).
+- **Optional diagnostics** — setting `GKMD_SWITCH_DEBUG=1` (or
+  `GKME_SWITCH_DEBUG=1`, or placing an empty `switch_debug.txt` next to the
+  executable) writes sampled `gkme_switch.log` lines: device creation, stream
+  and submitted-body hex, report-mode changes and rumble decoding. Disabled,
+  it costs one bool test per call site.
+
+### Artifacts
+
+| File | Size | Notes |
+| --- | --- | --- |
+| `GKMD-v4.9.1-windows-x64.zip` | 26,708,544 bytes | Windows x64: `GKMD.dll` (29,085,184 bytes, NativeAOT PE, embeds `USBip-0.9.8.1-x64.exe`), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.1-windows-arm64.zip` | 19,569,077 bytes | Windows ARM64: `GKMD.dll` (22,145,024 bytes, NativeAOT PE, embeds `USBip-0.9.8.1-arm64.exe`), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.1-linux-x64.zip` | 1,651,523 bytes | Linux x64: `libGKMD.so` (3,323,776 bytes, NativeAOT ELF, no installer payload), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.1-linux-arm64.zip` | 1,580,390 bytes | Linux ARM64: `libGKMD.so` (3,438,392 bytes, NativeAOT ELF, no installer payload), `gkmd.h`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` |
+
+SHA-256:
+
+- `GKMD-v4.9.1-windows-x64.zip`: `0C70D19CFA81CABB2BDCFA021F9AA91C3E5B8C172EAA8EA9905B2645DD3CBFE4`
+- `GKMD-v4.9.1-windows-arm64.zip`: `28F5218BAE3524B8398008EC1E1D83F4335D8AEF9E06B2A3CED48730BB18F7D2`
+- `GKMD-v4.9.1-linux-x64.zip`: `DAEBFBFB9762B04E27E80BF2DDB287F99F1E7253DDA7FCCC1F4ECD9753D79BDB`
+- `GKMD-v4.9.1-linux-arm64.zip`: `80EC02265E799E7512B320AF6D7B5FC462A5C53DB83F8E283F6F5F31AC63634C`
+
+### Build / verify
+
+```powershell
+dotnet build -c Release                          # IL + analyzers, 0 warnings
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
+```
+
+### Notes
+
+- The wire format changed: the report descriptor is now 149 bytes (was 203)
+  and the default input report before a protocol host connects is `0x3F`
+  (12 bytes), not `0x30` (64 bytes). Protocol hosts that send subcommand
+  `0x03 0x30` during init still receive the full report.
+- Consumers that reference the released native library through the `gkmd_*`
+  C ABI need no code change.
+- Switch diagnostics remain opt-in; nothing is written to disk unless the
+  environment variable or marker file is present.
+
+---
+
+## v4.9.1 — 2026-11-14 — Switch 手柄在 DirectInput 与 eden 下的报文修复
+
+[English](#v491--2026-11-14--switch-report-fixes-for-directinput-and-eden) | **简体中文**
+
+GKMD 4.9.1 是 Switch Pro / Joy-Con persona 的缺陷修复版本。它把单一报文形状
+拆成按消费者区分的报文，并修正轴范围，使 Windows HIDClass/DirectInput 与
+eden（SDL HIDAPI 加它自带的 joycon 驱动）都能正确解析手柄。托管 API 与 C ABI
+函数均未变化。
+
+### 亮点
+
+- **`0x3F` 是唯一的标准 HID 手柄报文** —— USB HID 报告描述符现在把 `0x3F`
+  声明为 12 字节标准手柄（16 个按键、4 位 hat、X/Y/Rx/Ry），并把 `0x30` /
+  `0x21` / `0x81` 改为不透明的 63 字节 vendor 输入。因此在任何协议宿主连接
+  之前，DirectInput 就能看到一个真实手柄，也不会再把全量报文的 timer/battery
+  字节当成按键。输出报文 `0x01` / `0x10` / `0x80` / `0x82` 保持不透明。
+- **4 字节 Logical Maximum** —— 轴改用长格式 `0x27 FF FF 00 00`。2 字节的
+  `0x26 FF FF` 会被 HID 解析器符号扩展成 `-1`，导致 DirectInput 的轴范围
+  无效，即使按键与 hat 正常，X/Y/Rx/Ry 也恒为 0。
+- **同一时刻只发一种帧形状** —— 子命令 `0x03` 选择输入模式：`0x30` / `0x31`
+  发送 64 字节 Nintendo 全量报文，`0x3F`（默认）发送 12 字节简单帧。模式切换
+  时会丢弃旧形状的排队帧，eden 不会再把全量帧当成它的「仅输入」数字摇杆报文，
+  DirectInput 也不会在简单帧里读到 timer/battery 字节。`GET_REPORT(Input)`
+  按宿主请求的形状返回对应长度的最新帧。
+- **Switch `SubmitState` 打包 48 字节 body** —— 只有 `GKGamepadState` 的
+  调用方现在与 `SubmitRawReport` 走同一条 Nintendo body 路径：按键、两个
+  12 位摇杆与三帧 IMU。面键遵循 SDL 的位置映射（X/左、Y/上、A/下、B/右）。
+- **可选诊断日志** —— 设置 `GKMD_SWITCH_DEBUG=1`（或 `GKME_SWITCH_DEBUG=1`，
+  或在可执行文件旁放一个空的 `switch_debug.txt`）会向 `gkme_switch.log`
+  写入采样日志：设备创建、stream 与提交 body 的十六进制、报文模式切换和
+  震动解码。未启用时每个调用点只花一次 bool 判断。
+
+### 产物
+
+| 文件 | 大小 | 说明 |
+| --- | --- | --- |
+| `GKMD-v4.9.1-windows-x64.zip` | 26,708,544 字节 | Windows x64：`GKMD.dll`（29,085,184 字节，NativeAOT PE，内嵌 `USBip-0.9.8.1-x64.exe`）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.1-windows-arm64.zip` | 19,569,077 字节 | Windows ARM64：`GKMD.dll`（22,145,024 字节，NativeAOT PE，内嵌 `USBip-0.9.8.1-arm64.exe`）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.1-linux-x64.zip` | 1,651,523 字节 | Linux x64：`libGKMD.so`（3,323,776 字节，NativeAOT ELF，无安装器载荷）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+| `GKMD-v4.9.1-linux-arm64.zip` | 1,580,390 字节 | Linux ARM64：`libGKMD.so`（3,438,392 字节，NativeAOT ELF，无安装器载荷）、`gkmd.h`、`LICENSE`、`THIRD-PARTY-NOTICES.txt` |
+
+SHA-256：
+
+- `GKMD-v4.9.1-windows-x64.zip`：`0C70D19CFA81CABB2BDCFA021F9AA91C3E5B8C172EAA8EA9905B2645DD3CBFE4`
+- `GKMD-v4.9.1-windows-arm64.zip`：`28F5218BAE3524B8398008EC1E1D83F4335D8AEF9E06B2A3CED48730BB18F7D2`
+- `GKMD-v4.9.1-linux-x64.zip`：`DAEBFBFB9762B04E27E80BF2DDB287F99F1E7253DDA7FCCC1F4ECD9753D79BDB`
+- `GKMD-v4.9.1-linux-arm64.zip`：`80EC02265E799E7512B320AF6D7B5FC462A5C53DB83F8E283F6F5F31AC63634C`
+
+### 构建 / 验证
+
+```powershell
+dotnet build -c Release                          # IL + 分析器，0 警告
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-x64
+dotnet build -c Release -f net10.0-windows -t:PackageRelease -r win-arm64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-x64
+dotnet build -c Release -f net10.0 -t:PackageRelease -r linux-arm64
+```
+
+### 说明
+
+- 线上格式已改变：报告描述符现在是 149 字节（原为 203 字节），协议宿主连接
+  前的默认输入报文是 `0x3F`（12 字节），不再是 `0x30`（64 字节）。在初始化
+  时发送子命令 `0x03 0x30` 的协议宿主仍会收到全量报文。
+- 通过 `gkmd_*` C ABI 引用发布产物的使用者无需改动代码。
+- Switch 诊断日志仍为显式开启；没有环境变量或标记文件时不会写任何文件。
+
+---
+
 ## v4.9.0 — 2026-11-01 — NativeAOT distribution, Linux support and Windows on Arm
 
 **English** | [简体中文](#v490--2026-11-01--nativeaot-分发linux-支持与-windows-on-arm)
