@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -135,8 +136,29 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private readonly Queue<QueuedFrame> _switchReplies = new();  // 0x81/0x21 replies, served before stream frames
     private readonly byte[] _switchBody = new byte[48];          // latest consumer-packed 0x30 body
     private volatile bool _switchImuEnabled;
+    // Input report mode the host last selected through subcommand 0x03:
+    // 0x30 full, 0x31 NFC/IR, 0x3F simple HID. The streamer emits exactly
+    // the matching body shape: full-mode 0x30 with timer/battery, or the
+    // 12-byte 0x3F simple frame with buttons first and no timer/battery.
+    // Start in 0x3F: that is the descriptor's standard gamepad report, so
+    // Windows HID/DirectInput has real input before any protocol host
+    // arrives. SDL/eden send 0x03 0x30 during init and switch to full.
+    private volatile byte _switchInputMode = 0x3F;
+    // Latest frame of each shape, for GET_REPORT(Input) polling: the host
+    // names the report ID in wValue, and 0x3F/0x30 now have different
+    // lengths and shapes.
+    private readonly byte[] _switchSimpleReport = new byte[SwitchSimpleFrameSize];
+    private readonly byte[] _switchFullReport = new byte[SwitchFrameSize];
     private int _switchTimerCounter;
     private uint _lastSwitchSharedSeqNo;
+    // Diagnostic sampling timestamps (SwitchLog, env-gated).
+    private long _switchLastInLogMs;
+    private long _switchLastBodyLogMs;
+    private int _switchLastBodyLen = -1;
+    private long _switchLastFrameLogMs;
+    private byte _switchLastLoggedMode = 0xFF;
+    private long _switchLastGetReportLogMs;
+    private long _switchLastRumbleLogMs;
     private static readonly byte[] SwitchMacTemplate = { 0x98, 0xB6, 0xE9, 0x48, 0x4D, 0x30 };
 
     // Sony test command state machine
@@ -205,11 +227,18 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         if (_builder != null && _builder.InputReportId != 0) _lastInputReport[0] = _builder.InputReportId;
         if (_switchProtocol)
         {
-            _lastInputReportLength = 64;
-            _lastInputReport[0] = 0x30;
+            _lastInputReportLength = SwitchSimpleFrameSize;
+            _lastInputReport[0] = 0x3F;
+            _switchSimpleReport[0] = 0x3F;
+            _switchFullReport[0] = 0x30;
             // Neutral 12-bit sticks: 0x800 packed little-nibble = 00 08 80.
             _switchBody[5] = 0x00; _switchBody[6] = 0x08; _switchBody[7] = 0x80;
             _switchBody[8] = 0x00; _switchBody[9] = 0x08; _switchBody[10] = 0x80;
+
+            if (SwitchLog.Enabled)
+                SwitchLog.Write($"create index={index} vid=0x{Descriptors.VendorId:X4} " +
+                                $"pid=0x{Descriptors.ProductId:X4} type={_switchDeviceType} " +
+                                $"log={SwitchLog.PathForDisplay}");
         }
 
         // Sections and events first, so both this device and the
@@ -279,6 +308,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         if (_switchProtocol)
         {
             _switchImuEnabled = false;
+            _switchInputMode = 0x3F;
             Interlocked.Exchange(ref _switchTimerCounter, 0);
             _lastSwitchSharedSeqNo = 0;
         }
@@ -626,10 +656,27 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     // state machine and the fabricated SPI image, and streams report 0x30 at
     // the real 15 ms cadence so SDL's HIDAPI_DriverSwitch completes its USB
     // init (0x80 handshake, 0x01 subcommands) and eden sees a genuine pad.
+    //
+    // Exactly one input shape streams at a time, selected by the report mode
+    // the host last set through subcommand 0x03:
+    //   0x3F        -> 12-byte report 0x3F, the descriptor's standard HID
+    //                  gamepad (buttons, hat, X/Y/Rx/Ry, no timer/battery)
+    //   0x30 / 0x31 -> 64-byte Nintendo full report 0x30 (timer, battery,
+    //                  buttons, sticks, vibrator, IMU)
+    // Never stream both: they are different wire formats, not two views of
+    // one frame. eden's own joycon driver parses report 0x3F as the
+    // "input-only" digital-stick packet (byte 3 nibbles are left/right stick
+    // directions), while SDL/DirectInput parse it as hat + analog sticks.
+    // Interleaving 0x3F into a full-mode stream makes eden read its right
+    // stick as permanently pushed, and the reverse mixes timer/battery into
+    // a simple frame. The real pad switches shape the same way, so after a
+    // full-mode host closes and restores 0x3F, DirectInput sees the pad
+    // again on its next read.
 
     private const byte SwitchBatteryConn = 0x91; // full + charging, wired
     private const byte SwitchVibrator = 0xB0;
     private const int SwitchFrameSize = 64;
+    private const int SwitchSimpleFrameSize = 12;
 
     private void SwitchPumpLoop()
     {
@@ -643,17 +690,43 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     Thread.Sleep(15);
                 if (_stop) break;
 
+                byte mode = _switchInputMode;
+                bool fullMode = mode == 0x30 || mode == 0x31;
+                int frameSize = fullMode ? SwitchFrameSize : SwitchSimpleFrameSize;
+
                 TryReadSwitchBody();
 
                 byte[] frame;
                 lock (_hidLock) frame = TakeFrameBufferLocked();
-                BuildSwitchFrame(frame);
+                if (fullMode) BuildSwitchFrame(frame);
+                else BuildSwitchSimpleFrame(frame);
+
+                if (SwitchLog.Enabled
+                    && (mode != _switchLastLoggedMode
+                        || SwitchLog.Due(ref _switchLastFrameLogMs)))
+                {
+                    SwitchLog.Hex($"stream rid=0x{frame[0]:X2} len={frameSize} mode=0x{mode:X2}",
+                                  frame.AsSpan(0, frameSize), 24);
+                    _switchLastLoggedMode = mode;
+                }
+
                 uint seq = 0;
                 bool have = false;
                 lock (_hidLock)
                 {
-                    _lastInputReportLength = SwitchFrameSize;
-                    frame.AsSpan(0, SwitchFrameSize).CopyTo(_lastInputReport);
+                    // Subcommand 0x03 may have switched the shape between the
+                    // mode read above and this lock. Never publish a frame of
+                    // the old shape after that point: the host's input thread
+                    // starts as soon as the 0x21 reply lands.
+                    if (_switchInputMode != mode)
+                    {
+                        RecycleFrameLocked(frame);
+                        continue;
+                    }
+                    _lastInputReportLength = frameSize;
+                    frame.AsSpan(0, frameSize).CopyTo(_lastInputReport);
+                    frame.AsSpan(0, frameSize).CopyTo(
+                        fullMode ? _switchFullReport : _switchSimpleReport);
                     if (_pendingInterruptIn.Count > 0)
                     {
                         seq = _pendingInterruptIn.Dequeue();
@@ -661,12 +734,12 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     }
                     else
                     {
-                        _frameQueue.Enqueue(new QueuedFrame(frame, SwitchFrameSize));
+                        _frameQueue.Enqueue(new QueuedFrame(frame, frameSize));
                     }
                 }
                 if (have)
                 {
-                    SendInterruptInReply(seq, new ReadOnlySpan<byte>(frame, 0, SwitchFrameSize));
+                    SendInterruptInReply(seq, new ReadOnlySpan<byte>(frame, 0, frameSize));
                     lock (_hidLock) RecycleFrameLocked(frame);
                 }
             }
@@ -710,6 +783,14 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         if (dataLen == 0) return;
         lock (_switchLock)
             snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(_switchBody);
+
+        if (SwitchLog.Enabled
+            && (dataLen != _switchLastBodyLen || SwitchLog.Due(ref _switchLastBodyLogMs)))
+        {
+            SwitchLog.Hex($"submit body len={dataLen} seq={seq1}",
+                          snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen), 32);
+            _switchLastBodyLen = dataLen;
+        }
     }
 
     /// <summary>Build one 64-byte report-0x30 full-mode frame from the latest
@@ -729,6 +810,106 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             if (_switchImuEnabled) _switchBody.AsSpan(12, 36).CopyTo(f[13..49]);
         }
         f[12] = SwitchVibrator;
+    }
+
+    /// <summary>Build one 12-byte report-0x3F simple HID frame: two button
+    /// bytes at 1-2, the hat in the low nibble of byte 3, then X/Y/Rx/Ry as
+    /// unsigned 16-bit little-endian at 4-11. This is the layout SDL's
+    /// SwitchSimpleStatePacket_t and the descriptor's standard gamepad use.
+    /// No timer or battery byte exists in this shape; a host that selected
+    /// simple mode reads bytes 1-2 as its first buttons, so those bytes must
+    /// never be the full-mode timer/battery pair. eden's own joycon driver
+    /// reads 0x3F as a different, digital-stick "input-only" packet, which
+    /// is why this frame is only streamed while the host is in 0x3F mode.</summary>
+    private void BuildSwitchSimpleFrame(byte[] frame)
+    {
+        var f = frame.AsSpan(0, SwitchSimpleFrameSize);
+        f.Clear();
+        f[0] = 0x3F;
+
+        Span<byte> state = stackalloc byte[9];
+        lock (_switchLock)
+            _switchBody.AsSpan(2, 9).CopyTo(state);
+
+        GetSwitchSimpleState(state,
+            out byte b1, out byte b2, out byte hat,
+            out ushort ax, out ushort ay, out ushort arx, out ushort ary);
+
+        f[1] = b1;
+        f[2] = b2;
+        f[3] = (byte)(hat & 0x0F);
+        BinaryPrimitives.WriteUInt16LittleEndian(f[4..], ax);
+        BinaryPrimitives.WriteUInt16LittleEndian(f[6..], ay);
+        BinaryPrimitives.WriteUInt16LittleEndian(f[8..], arx);
+        BinaryPrimitives.WriteUInt16LittleEndian(f[10..], ary);
+    }
+
+    /// <summary>Translate the packed Nintendo 9-byte buttons+sticks slice
+    /// (state[0..2] buttons, state[3..8] two 12-bit stick pairs) into the
+    /// descriptor's simple HID fields. Mirrors driver.c's
+    /// SwitchBuildSimpleFrame, including the HID down-positive Y inversion
+    /// and the 0x3F hat encoding (0-7 clockwise from up, 8 = null).</summary>
+    private static void GetSwitchSimpleState(ReadOnlySpan<byte> state,
+        out byte b1, out byte b2, out byte hat,
+        out ushort ax, out ushort ay, out ushort arx, out ushort ary)
+    {
+        byte n0 = state[0]; // Y X B A SR SL R ZR
+        byte n1 = state[1]; // Minus Plus RStick LStick Home Capture
+        byte n2 = state[2]; // Down Up Right Left SR SL L ZL
+
+        b1 = 0;
+        if ((n0 & 0x04) != 0) b1 |= 0x01; // B
+        if ((n0 & 0x08) != 0) b1 |= 0x02; // A
+        if ((n0 & 0x01) != 0) b1 |= 0x04; // Y
+        if ((n0 & 0x02) != 0) b1 |= 0x08; // X
+        if ((n2 & 0x40) != 0) b1 |= 0x10; // L
+        if ((n0 & 0x40) != 0) b1 |= 0x20; // R
+        if ((n2 & 0x80) != 0) b1 |= 0x40; // ZL
+        if ((n0 & 0x80) != 0) b1 |= 0x80; // ZR
+
+        b2 = 0;
+        if ((n1 & 0x01) != 0) b2 |= 0x01; // Minus
+        if ((n1 & 0x02) != 0) b2 |= 0x02; // Plus
+        if ((n1 & 0x08) != 0) b2 |= 0x04; // LStick
+        if ((n1 & 0x04) != 0) b2 |= 0x08; // RStick
+        if ((n1 & 0x10) != 0) b2 |= 0x10; // Home
+        if ((n1 & 0x20) != 0) b2 |= 0x20; // Capture
+
+        bool down  = (n2 & 0x01) != 0;
+        bool up    = (n2 & 0x02) != 0;
+        bool right = (n2 & 0x04) != 0;
+        bool left  = (n2 & 0x08) != 0;
+        hat = 8; // null state
+        if (up && right)         hat = 1;
+        else if (right && down)  hat = 3;
+        else if (down && left)   hat = 5;
+        else if (left && up)     hat = 7;
+        else if (up)             hat = 0;
+        else if (right)          hat = 2;
+        else if (down)           hat = 4;
+        else if (left)           hat = 6;
+
+        ushort lx = (ushort)(state[3] | ((state[4] & 0x0F) << 8));
+        ushort ly = (ushort)((state[4] >> 4) | (state[5] << 4));
+        ushort rx = (ushort)(state[6] | ((state[7] & 0x0F) << 8));
+        ushort ry = (ushort)((state[7] >> 4) | (state[8] << 4));
+
+        ax  = ScaleSwitchStick(lx, invert: false);
+        ay  = ScaleSwitchStick(ly, invert: true);
+        arx = ScaleSwitchStick(rx, invert: false);
+        ary = ScaleSwitchStick(ry, invert: true);
+    }
+
+    /// <summary>Rescale a packed 12-bit stick value (0x800 centre, 0x600
+    /// range) into the descriptor's unsigned 16-bit logical range. The
+    /// Nintendo body is up-positive, HID is down-positive, so Y and Ry pass
+    /// invert=true.</summary>
+    private static ushort ScaleSwitchStick(ushort value12, bool invert)
+    {
+        int defl = (int)value12 - 0x800;
+        if (invert) defl = -defl;
+        int scaled = 32768 + defl * 32768 / 0x600;
+        return (ushort)Math.Clamp(scaled, 0, 65535);
     }
 
     /// <summary>Queue a synthesized reply frame (0x81/0x21). Completes a parked
@@ -766,6 +947,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private void SwitchHandleProprietary(ReadOnlySpan<byte> payload)
     {
         byte cmd = payload.Length > 0 ? payload[0] : (byte)0;
+        if (SwitchLog.Enabled)
+            SwitchLog.Hex($"proprietary cmd=0x{cmd:X2}", payload, 40);
         switch (cmd)
         {
             case 0x01: // Status: 81 01 00 <type> <MAC reversed>
@@ -800,6 +983,9 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         byte subcmd = payload[9];
         var args = payload[10..];
 
+        if (SwitchLog.Enabled)
+            SwitchLog.Hex($"subcommand 0x{subcmd:X2} args={args.Length}", args, 32);
+
         var reply = RentFrameBuffer();
         var r = reply.AsSpan(0, SwitchFrameSize);
         r.Clear();
@@ -832,9 +1018,29 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 if (args.Length >= 1 &&
                     (args[0] == 0x30 || args[0] == 0x31 || args[0] == 0x3F))
                 {
-                    // The USB descriptor only declares the 0x30 full-mode report,
-                    // so the streamer keeps emitting 0x30 regardless of the
-                    // requested mode (accepted with a generic ACK).
+                    // 0x30/0x31 switch the stream to the full Nintendo frame;
+                    // 0x3F switches it back to the standard simple frame.
+                    // Exactly one shape streams at a time, so drop frames of
+                    // the old shape already queued for the interrupt IN
+                    // endpoint. A host that enables its input thread right
+                    // after this subcommand would otherwise read those stale
+                    // frames first (eden parses 0x3F as digital stick data).
+                    // Leave _switchReplies alone: the 0x21 reply to this very
+                    // subcommand is still pending.
+                    if (SwitchLog.Enabled)
+                        SwitchLog.Write($"SetInputReportMode 0x{_switchInputMode:X2} -> 0x{args[0]:X2}");
+                    _switchInputMode = args[0];
+                    lock (_hidLock)
+                    {
+                        while (_frameQueue.Count > 0)
+                            RecycleFrameLocked(_frameQueue.Dequeue().Buffer);
+                    }
+                }
+                else if (SwitchLog.Enabled)
+                {
+                    SwitchLog.Write(args.Length >= 1
+                        ? $"SetInputReportMode ignored arg=0x{args[0]:X2} (mode 0x{_switchInputMode:X2})"
+                        : $"SetInputReportMode ignored (no arg, mode 0x{_switchInputMode:X2})");
                 }
                 break;
 
@@ -938,6 +1144,11 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// published raw so GamepadSession can decode HD rumble into LRA audio.</summary>
     private void HandleSwitchOutput(byte reportId, ReadOnlySpan<byte> data)
     {
+        if (SwitchLog.Enabled
+            && (reportId != 0x10 || SwitchLog.Due(ref _switchLastRumbleLogMs)))
+        {
+            SwitchLog.Hex($"switch output rid=0x{reportId:X2}", data, 40);
+        }
         if (reportId == 0x80)
         {
             SwitchHandleProprietary(data);
@@ -1063,6 +1274,12 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     SendInterruptInReply(cmd.Seqnum, new ReadOnlySpan<byte>(frame.Buffer, 0, frame.Length));
                     lock (_hidLock) RecycleFrameLocked(frame.Buffer!);
                 }
+                if (_switchProtocol && SwitchLog.Enabled && SwitchLog.Due(ref _switchLastInLogMs))
+                {
+                    SwitchLog.Write(have
+                        ? $"IN ep=0x{epAddr:X2} frame id=0x{frame.Buffer![0]:X2} len={frame.Length} mode=0x{_switchInputMode:X2}"
+                        : $"IN ep=0x{epAddr:X2} parked (no frame) mode=0x{_switchInputMode:X2}");
+                }
                 return;
             }
 
@@ -1070,6 +1287,11 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             // descriptor declares IDs. Same split as driver.c WRITE_REPORT.
             byte rid = outPayload.Length > 0 ? outPayload[0] : (byte)0;
             var outData = outPayload.Length > 0 ? outPayload[1..] : ReadOnlySpan<byte>.Empty;
+            if (_switchProtocol && SwitchLog.Enabled
+                && (rid != 0x10 || SwitchLog.Due(ref _switchLastRumbleLogMs)))
+            {
+                SwitchLog.Hex($"EPOUT ep=0x{epAddr:X2} rid=0x{rid:X2}", outPayload, 40);
+            }
             if (_gipProtocol)
                 HandleGipOutput(outPayload); // GIP frames are not report-ID prefixed
             else if (_switchProtocol && (rid == 0x80 || rid == 0x01 || rid == 0x10))
@@ -1129,6 +1351,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         if (_gipProtocol)
             GipLog.Write($"CTRL rt=0x{bmRequestType:X2} req=0x{bRequest:X2} " +
                          $"val=0x{wValue:X4} idx=0x{wIndex:X4} len={wLength} type={type} rcp={recipient} in={deviceToHost}");
+        if (_switchProtocol && SwitchLog.Enabled && !(bRequest == 0x01 && deviceToHost))
+            SwitchLog.Write($"CTRL rt=0x{bmRequestType:X2} req=0x{bRequest:X2} " +
+                            $"val=0x{wValue:X4} idx=0x{wIndex:X4} len={wLength} " +
+                            $"type={type} rcp={recipient} in={deviceToHost}");
 
         // Hub port reset arrives as USB_RT_PORT SET_FEATURE(PORT_RESET)
         // (usbip-win2 device_ioctl.cpp make_reset_port: "meaningless for a
@@ -1346,11 +1572,29 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                             return;
                         }
                     }
+                    byte[] source = _lastInputReport;
+                    int sourceLen = _lastInputReportLength;
+                    if (_switchProtocol && reportId == 0x3F)
+                    {
+                        source = _switchSimpleReport;
+                        sourceLen = SwitchSimpleFrameSize;
+                    }
+                    else if (_switchProtocol && reportId == 0x30)
+                    {
+                        source = _switchFullReport;
+                        sourceLen = SwitchFrameSize;
+                    }
                     int n;
                     lock (_hidLock)
                     {
-                        n = Math.Min(Math.Min(_lastInputReportLength, _lastInputReport.Length), wLength);
-                        _lastInputReport.AsSpan(0, n).CopyTo(_controlReply);
+                        n = Math.Min(Math.Min(sourceLen, source.Length), wLength);
+                        source.AsSpan(0, n).CopyTo(_controlReply);
+                    }
+                    if (_switchProtocol && SwitchLog.Enabled
+                        && SwitchLog.Due(ref _switchLastGetReportLogMs))
+                    {
+                        SwitchLog.Write($"GET_REPORT(Input) id=0x{reportId:X2} " +
+                                        $"wLength={wLength} -> len={n} mode=0x{_switchInputMode:X2}");
                     }
                     SendRetSubmitSpan(cmd.Seqnum, 0, n, _controlReply.AsSpan(0, n));
                     return;
@@ -1475,19 +1719,59 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                     return;
                 }
-                byte rid = payload.Length > 0 ? payload[0] : reportId;
-                var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
-
                 // Switch Pro: keyboard-style SetReport routing of the 0x80/0x01/
                 // 0x10 output reports (some HID stacks send these via the control
-                // pipe when no interrupt OUT transfer is pending).
-                if (_switchProtocol && reportType != 0x03
-                    && (rid == 0x80 || rid == 0x01 || rid == 0x10))
+                // pipe when no interrupt OUT transfer is pending). The report ID
+                // is in wValue; whether the data stage repeats it depends on the
+                // stack, so accept both forms. The declared output payload is 63
+                // bytes, so a 64-byte stage is the ID-prefixed form.
+                if (_switchProtocol && reportType != 0x03)
                 {
-                    HandleSwitchOutput(rid, data);
-                    SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
-                    return;
+                    byte srid = reportId;
+                    ReadOnlySpan<byte> sdata = payload;
+                    bool idInData = false;
+
+                    if (SwitchLog.Enabled)
+                    {
+                        SwitchLog.Write($"SET_REPORT type=0x{reportType:X2} " +
+                                        $"reportId=0x{reportId:X2} payloadLen={payload.Length} " +
+                                        $"first=0x{(payload.Length > 0 ? payload[0] : 0):X2}");
+                    }
+
+                    if (srid != 0x80 && srid != 0x01 && srid != 0x10)
+                    {
+                        // Some stacks leave wValue's report ID at 0 and put
+                        // the report ID first in the data stage instead.
+                        if (payload.Length > 0 &&
+                            (payload[0] == 0x80 || payload[0] == 0x01 || payload[0] == 0x10))
+                        {
+                            srid = payload[0];
+                            sdata = payload[1..];
+                            idInData = true;
+                        }
+                    }
+                    else if (payload.Length > 0 && payload[0] == srid
+                             && payload.Length != 63)
+                    {
+                        sdata = payload[1..];
+                        idInData = true;
+                    }
+
+                    if (srid == 0x80 || srid == 0x01 || srid == 0x10)
+                    {
+                        if (SwitchLog.Enabled)
+                        {
+                            SwitchLog.Write($"  switch route srid=0x{srid:X2} " +
+                                            $"idInData={idInData} dataLen={sdata.Length}");
+                        }
+                        HandleSwitchOutput(srid, sdata);
+                        SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                        return;
+                    }
                 }
+
+                byte rid = payload.Length > 0 ? payload[0] : reportId;
+                var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
 
                 // DS4 authentication protocol:
                 // SET_FEATURE 0x80 with [0x03, 0x03] -> next GET_FEATURE 0x81 returns challenge response
@@ -1904,6 +2188,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             ClearQueuesLocked();
         }
         _switchImuEnabled = false;
+        _switchInputMode = 0x3F;
         Interlocked.Exchange(ref _switchTimerCounter, 0);
         _lastSwitchSharedSeqNo = 0;
         _gip?.Reset();

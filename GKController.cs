@@ -89,6 +89,11 @@ public sealed class GKController : IDisposable
     // call; this 64-byte buffer absorbs the copy without the alloc churn.
     private readonly byte[] _rawReportBuffer = new byte[64];
 
+    // Switch SubmitState packs the fixed 48-byte Nintendo body, not the
+    // descriptor-shaped HID report: the profile descriptor now leads with
+    // the 12-byte simple report, so _rawReportBuffer is too small for it.
+    private readonly byte[] _switchBodyBuffer = new byte[48];
+
     /// <summary>Raised on the SDK's output-polling thread whenever a host
     /// application sends a rumble, haptic, FFB, feature, or LED command to
     /// this virtual controller. Subscribers must be thread-safe.
@@ -349,6 +354,21 @@ public sealed class GKController : IDisposable
         long startTicks = OnSubmitLatencyMicros != null
             ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
+        // The Switch personas stream a Nintendo 48-byte body, not a
+        // descriptor-shaped HID report. SubmitState packs that body here so
+        // a caller that only has GKGamepadState still drives the same wire
+        // path as SubmitRawReport (buttons, sticks and IMU).
+        if (IsSwitchProfile)
+        {
+            SubmitSwitchState(in state);
+            if (OnSubmitLatencyMicros != null)
+            {
+                long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+                OnSubmitLatencyMicros(elapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
+            }
+            return;
+        }
+
         // The six simple-slot values feed only two paths: the extended
         // vendor-blob codec and the XUSB GIP block. The descriptor path reads
         // the axes itself inside BuildReportInto, so a plain HID frame does
@@ -574,6 +594,131 @@ public sealed class GKController : IDisposable
             long micros = elapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
             OnSubmitLatencyMicros(micros);
         }
+    }
+
+    private bool IsSwitchProfile =>
+        Profile.VendorId == 0x057E
+        && (Profile.ProductId == 0x2009 || Profile.ProductId == 0x2006 ||
+            Profile.ProductId == 0x2007);
+
+    /// <summary>Pack the 48-byte Nintendo report-0x30 body from a
+    /// <see cref="GKGamepadState"/>. Layout: <c>[0]</c> counter,
+    /// <c>[1]</c> battery, <c>[2..4]</c> buttons, <c>[5..10]</c> two 12-bit
+    /// little-nibble sticks, <c>[11]</c> vibrator, <c>[12..47]</c> three IMU
+    /// frames. Counter/battery/vibrator are overlaid device-side.</summary>
+    private void SubmitSwitchState(in GKGamepadState state)
+    {
+        Span<byte> body = _switchBodyBuffer;
+        body.Clear();
+
+        uint b = (uint)state.Buttons;
+        byte n0 = 0, n1 = 0, n2 = 0;
+
+        // SDL wires the face buttons by position, not Nintendo label:
+        // X/left, Y/top, A/bottom, B/right.
+        if ((b & (uint)GKButton.X) != 0) n0 |= 0x01;
+        if ((b & (uint)GKButton.Y) != 0) n0 |= 0x02;
+        if ((b & (uint)GKButton.A) != 0) n0 |= 0x04;
+        if ((b & (uint)GKButton.B) != 0) n0 |= 0x08;
+        if ((b & (uint)GKButton.RightBumper) != 0) n0 |= 0x40; // R
+        if ((b & (uint)GKButton.LeftBumper) != 0) n2 |= 0x40;  // L
+
+        if ((b & (uint)GKButton.Back) != 0) n1 |= 0x01;        // Minus
+        if ((b & (uint)GKButton.Start) != 0) n1 |= 0x02;       // Plus
+        if ((b & (uint)GKButton.RightStick) != 0) n1 |= 0x04;
+        if ((b & (uint)GKButton.LeftStick) != 0) n1 |= 0x08;
+        if ((b & (uint)GKButton.Guide) != 0) n1 |= 0x10;       // Home
+        if ((b & ((uint)GKButton.Share | (uint)GKButton.Misc1)) != 0) n1 |= 0x20;
+
+        // ZL/ZR have no GKButton bit; derive them from the profile's trigger
+        // axes when it declares any (the stock Switch profile does not).
+        if (_cachedTriggers.Count > 0
+            && GetStateAxis(state, _cachedTriggers[0].Axis, 0.0) > 0.5) n2 |= 0x80;
+        if (_cachedTriggers.Count > 1
+            && GetStateAxis(state, _cachedTriggers[1].Axis, 0.0) > 0.5) n0 |= 0x80;
+
+        switch (state.Hat)
+        {
+            case GKHat.North:     n2 |= 0x02; break;
+            case GKHat.NorthEast: n2 |= 0x02 | 0x04; break;
+            case GKHat.East:      n2 |= 0x04; break;
+            case GKHat.SouthEast: n2 |= 0x04 | 0x01; break;
+            case GKHat.South:     n2 |= 0x01; break;
+            case GKHat.SouthWest: n2 |= 0x01 | 0x08; break;
+            case GKHat.West:      n2 |= 0x08; break;
+            case GKHat.NorthWest: n2 |= 0x08 | 0x02; break;
+        }
+
+        body[2] = n0;
+        body[3] = n1;
+        body[4] = n2;
+
+        var sticks = _cachedSticks;
+        GKAxis lxAxis = sticks.Count > 0 ? sticks[0].XAxis : GKAxis.X;
+        GKAxis lyAxis = sticks.Count > 0 ? sticks[0].YAxis : GKAxis.Y;
+        GKAxis rxAxis = sticks.Count > 1 ? sticks[1].XAxis : GKAxis.Z;
+        GKAxis ryAxis = sticks.Count > 1 ? sticks[1].YAxis : GKAxis.Rz;
+        PackSwitchStick(body, 5,
+            SwitchStickRaw(GetStateAxis(state, lxAxis, 0.5), invert: false),
+            SwitchStickRaw(GetStateAxis(state, lyAxis, 0.5), invert: true));
+        PackSwitchStick(body, 8,
+            SwitchStickRaw(GetStateAxis(state, rxAxis, 0.5), invert: false),
+            SwitchStickRaw(GetStateAxis(state, ryAxis, 0.5), invert: true));
+
+        short ax = ToSwitchShort(-state.AccelGZ * 417.6779f);
+        short ay = ToSwitchShort(-state.AccelGX * 417.6779f);
+        short az = ToSwitchShort(state.AccelGY * 417.6779f);
+        short gx = ToSwitchShort(-state.GyroDpsZ * 818.4167f);
+        short gy = ToSwitchShort(-state.GyroDpsX * 818.4167f);
+        short gz = ToSwitchShort(state.GyroDpsY * 818.4167f);
+        for (int frame = 0; frame < 3; frame++)
+        {
+            int o = 12 + frame * 12;
+            WriteSwitchInt16(body, o + 0, ax);
+            WriteSwitchInt16(body, o + 2, ay);
+            WriteSwitchInt16(body, o + 4, az);
+            WriteSwitchInt16(body, o + 6, gx);
+            WriteSwitchInt16(body, o + 8, gy);
+            WriteSwitchInt16(body, o + 10, gz);
+        }
+
+        SharedMemoryIO.WriteInputFrame(
+            _inputView, _inputEvent, ref _inputSeqNo,
+            body, body.Length,
+            _packsGipBuffer ? _gipBuf : null,
+            companionEvent: _companionInputEvent);
+    }
+
+    private static double GetStateAxis(in GKGamepadState state, GKAxis axis, double fallback)
+    {
+        var axes = state.Axes;
+        return axes != null && axes.TryGetValue(axis, out var v)
+            ? Math.Clamp(v, 0f, 1f)
+            : fallback;
+    }
+
+    private static ushort SwitchStickRaw(double value, bool invert)
+    {
+        double centered = (Math.Clamp(value, 0.0, 1.0) * 2.0) - 1.0;
+        if (invert) centered = -centered;
+        int raw = 0x800 + (int)(centered * 0x600);
+        return (ushort)Math.Clamp(raw, 0, 0xFFF);
+    }
+
+    private static void PackSwitchStick(Span<byte> body, int offset, ushort x, ushort y)
+    {
+        body[offset + 0] = (byte)(x & 0xFF);
+        body[offset + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
+        body[offset + 2] = (byte)(y >> 4);
+    }
+
+    private static short ToSwitchShort(float value)
+        => (short)Math.Clamp((int)MathF.Round(value), short.MinValue, short.MaxValue);
+
+    private static void WriteSwitchInt16(Span<byte> body, int offset, short value)
+    {
+        body[offset + 0] = (byte)(value & 0xFF);
+        body[offset + 1] = (byte)((value >> 8) & 0xFF);
     }
 
     /// <summary>Push a raw HID input report for features that

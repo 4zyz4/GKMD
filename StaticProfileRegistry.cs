@@ -699,39 +699,43 @@ internal static class StaticProfileRegistry
         };
     }
 
-    // Nintendo Switch Pro Controller, presented as a genuine USB HID pad
+    // Nintendo Switch Pro Controller, presented as a USB HID pad
     // (VID 0x057E / PID 0x2009) over the USB/IP backend so SDL3's
     // HIDAPI_DriverSwitch takes the USB init path (0x80 handshake, 0x01
     // subcommands) and eden sees a real Pro Controller with sensors and
-    // HD rumble. The HID report descriptor is DJm00n/ControllersInfo's
-    // USB dump (nativeDescriptor from GKMD's switch-pro profile);
-    // it declares reports 0x30/0x21/0x81 input and 0x01/0x10/0x80/0x82
-    // output, each 63-byte payload (64 including the report ID). The
-    // 0x80/0x01/0x10 interception and SPI image live in
-    // UsbipEmulatedDevice's Switch responder; the input body is packed by
-    // Core.SwitchProInput.
+    // HD rumble. The 0x80/0x01/0x10 interception and SPI image live in
+    // UsbipEmulatedDevice's Switch responder; the 48-byte input body is
+    // packed by the caller through SubmitRawReport (GKController also
+    // packs it from GKGamepadState for SubmitState).
 
-    // The Nintendo Switch family shares one USB HID report descriptor on
-    // USB: DJm00n/ControllersInfo's dump declares reports 0x30/0x21/0x81
-    // input and 0x01/0x10/0x80/0x82 output, each a 63-byte payload (64
-    // including the report ID). The OS HID stack only needs the top-level
-    // Generic Desktop / Joystick collection; SDL and eden parse the wire
-    // bytes by fixed offset, so the same descriptor serves Pro and Joy-Con.
+    // The Switch family shares one descriptor. It keeps the real pad's
+    // report IDs and 63-byte full-mode payloads, but gives each consumer
+    // its own report:
+    //   - 0x3F is the only standard HID gamepad (16 buttons, a 4-bit hat,
+    //     X/Y/Rx/Ry). Windows HIDClass/DirectInput parse it, so the
+    //     12-byte simple frame is delivered with buttons first.
+    //   - 0x30/0x21/0x81 are opaque 63-byte vendor inputs. SDL and eden
+    //     read them raw by report ID; DirectInput has no fields to map, so
+    //     the full-mode timer/battery bytes can never read as buttons.
+    //   - 0x01/0x10/0x80/0x82 stay opaque 63-byte outputs.
+    // The axes must use the 4-byte Logical Maximum form (0x27 FF FF 00 00).
+    // A 2-byte 0x26 FF FF is sign-extended to -1 by the HID parser, which
+    // leaves DirectInput's axis range invalid and reports 0 for X/Y/Rx/Ry
+    // even though buttons and the hat decode correctly.
     private const string SwitchUsbReportDescriptor =
-        "050115000904a1018530050105091901290a150025017501950a5500650081020509190b290e" +
-        "150025017501950481027501950281030b01000100a1000b300001000b310001000b32000100" +
-        "0b35000100150027ffff0000751095048102c00b39000100150025073500463b0165147504" +
-        "950181020509190f2912150025017501950481027508953481030600ff852109017508953f" +
-        "8103858109027508953f8103850109037508953f9183851009047508953f91838580090575" +
-        "08953f9183858209067508953f9183c0";
+        "05010905a101853f0509190129101500250175019510810205010939150025073500463b01" +
+        "65147504950181427504950181030501093009310933093416000027ffff0000751095048102" +
+        "0600ff090185307508953f8103090285217508953f8103090385817508953f8103090485" +
+        "017508953f9183090585107508953f9183090685807508953f9183090785827508953f91" +
+        "83c0";
 
     // One HID interface (class 3); the HID class descriptor declares the
-    // 0xCB = 203-byte report descriptor, interrupt IN 0x81 and interrupt
+    // 0x95 = 149-byte report descriptor, interrupt IN 0x81 and interrupt
     // OUT 0x01, both 64-byte, interval 8.
     private const string SwitchUsbConfigurationDescriptor =
         "090229000101008032" +
         "090400000103000000" +
-        "09211101000122CB00" +
+        "092111010001229500" +
         "07058103400008" +
         "07050103400008";
 
@@ -749,7 +753,7 @@ internal static class StaticProfileRegistry
             // bcdDevice 0x0200, iMfr 1 / iProduct 2 / iSerial 3.
             DeviceDescriptorHex = "12010002000000407E050920000201020301",
             // One HID interface (class 3), HID class descriptor declares the
-            // 0xCB = 203-byte report descriptor, interrupt IN 0x81 and
+            // 0x95 = 149-byte report descriptor, interrupt IN 0x81 and
             // interrupt OUT 0x01, both 64-byte, interval 8.
             ConfigurationDescriptorHex = SwitchUsbConfigurationDescriptor,
             Interfaces = new List<UsbInterfaceSpec>
@@ -791,9 +795,17 @@ internal static class StaticProfileRegistry
                     "reports a USB device path), so the responder must answer " +
                     "0x80 Handshake/HighSpeed with 0x81 replies and the 0x01 " +
                     "subcommand stream (device info, input mode, SPI reads, IMU " +
-                    "enable) with 0x21 replies. Input reports are the 48-byte " +
-                    "SwitchControllerStatePacket_t + 3x SwitchControllerIMUState_t " +
-                    "in report 0x30 (padded to the descriptor's 64 bytes). HD " +
+                    "enable) with 0x21 replies. Subcommand 0x03 picks the input " +
+                    "shape and only that shape streams. 0x30/0x31 select full " +
+                    "mode: the 48-byte SwitchControllerStatePacket_t + 3x " +
+                    "SwitchControllerIMUState_t body in report 0x30. 0x3F (the " +
+                    "default) selects the 12-byte report-0x3F simple frame (two " +
+                    "button bytes, hat, X/Y/Rx/Ry, no timer or battery), which " +
+                    "is the descriptor's only standard gamepad, so Windows " +
+                    "HID/DirectInput has a real pad before any protocol host " +
+                    "connects. Never interleave the two: they are different " +
+                    "wire formats and eden parses 0x3F as its digital-stick " +
+                    "input-only packet. HD " +
                     "rumble arrives in output 0x01/0x10 as two 4-byte blocks; " +
                     "GamepadSession decodes them and synthesizes sine audio for " +
                     "the phone's two LRAs.",
@@ -868,8 +880,15 @@ internal static class StaticProfileRegistry
                     "them into one pad and forwards sensors/rumble to each. " +
                     "eden's own joycon driver also enumerates these PIDs and " +
                     "reads the device type from subcommand 0x02 and SPI " +
-                    "0x6012. Input reports are the 48-byte SwitchController" +
-                    "StatePacket_t + 3x IMU in report 0x30 (padded to 64); HD " +
+                    "0x6012. Subcommand 0x03 picks the input shape and only " +
+                    "that shape streams: 0x30/0x31 send the 48-byte " +
+                    "SwitchControllerStatePacket_t + 3x IMU body in report " +
+                    "0x30, 0x3F (the default) sends the 12-byte simple frame " +
+                    "(two button bytes, hat, X/Y/Rx/Ry, no timer or battery), " +
+                    "which is the descriptor's only standard gamepad so " +
+                    "Windows HID/DirectInput has a real pad before any " +
+                    "protocol host connects. Never interleave the two: eden " +
+                    "parses 0x3F as its digital-stick input-only packet. HD " +
                     "rumble arrives in output 0x01/0x10 and GamepadSession " +
                     "decodes it for the phone's LRAs.",
             UsbConfiguration = uc
